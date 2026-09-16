@@ -118,6 +118,7 @@ type peerState struct {
 	lastConnTime       time.Time // last time we successfully connected to this peer
 	lastFailedConnTime time.Time // last time we failed to find or connect to this peer
 	connectFailures    uint      // number of times we've failed to connect to this peer
+	lastAddrWrite      time.Time // when this peer's addrs were last written to addrBook; zero means unknown; read only by the snapshot
 }
 
 type cachedAddrBook struct {
@@ -129,6 +130,12 @@ type cachedAddrBook struct {
 	allowPrivateIPs      bool // for testing
 	recentlyConnectedTTL time.Duration
 	relayAddrTTL         time.Duration
+
+	// Optional on-disk snapshot of the address book; see
+	// cached_addr_book_snapshot.go. snapshotMu serializes saveSnapshot calls.
+	snapshotPath     string
+	snapshotInterval time.Duration
+	snapshotMu       sync.Mutex
 
 	// findPeerSlots bounds concurrent background FindPeer lookups. A slot is
 	// held for the lifetime of one lookup. See DefaultMaxConcurrentFindPeers.
@@ -191,6 +198,23 @@ func WithMaxConcurrentFindPeers(n int) AddrBookOption {
 	}
 }
 
+// WithSnapshot enables an on-disk snapshot of the address book, written to
+// path every interval. The snapshot lets a restart resume from the cached
+// state instead of starting cold; see cached_addr_book_snapshot.go.
+func WithSnapshot(path string, interval time.Duration) AddrBookOption {
+	return func(cab *cachedAddrBook) error {
+		if path == "" {
+			return fmt.Errorf("snapshot path must not be empty")
+		}
+		if interval <= 0 {
+			return fmt.Errorf("snapshot interval must be positive, got %s", interval)
+		}
+		cab.snapshotPath = path
+		cab.snapshotInterval = interval
+		return nil
+	}
+}
+
 func newCachedAddrBook(opts ...AddrBookOption) (*cachedAddrBook, error) {
 	peerCache, err := lru.New[peer.ID, peerState](PeerCacheSize)
 	if err != nil {
@@ -214,6 +238,9 @@ func newCachedAddrBook(opts ...AddrBookOption) (*cachedAddrBook, error) {
 	logger.Infof("Using TTL of %s for recently connected peers", cab.recentlyConnectedTTL)
 	logger.Infof("Using TTL of %s for relay (/p2p-circuit) addresses", cab.relayAddrTTL)
 	logger.Infof("Probing enabled: %t", cab.probingEnabled)
+	if cab.snapshotPath != "" {
+		logger.Infof("Address book snapshot: %s every %s", cab.snapshotPath, cab.snapshotInterval)
+	}
 	return cab, nil
 }
 
@@ -271,7 +298,9 @@ func (cab *cachedAddrBook) background(ctx context.Context, host host.Host) {
 				if !exists {
 					pState = peerState{}
 				}
-				pState.lastConnTime = time.Now()
+				now := time.Now()
+				pState.lastConnTime = now
+				pState.lastAddrWrite = now
 				pState.lastFailedConnTime = time.Time{} // reset failed connection time
 				pState.connectFailures = 0              // reset connect failures on successful connection
 				cab.peerCache.Add(ev.Peer, pState)
@@ -303,6 +332,7 @@ func (cab *cachedAddrBook) background(ctx context.Context, host host.Host) {
 				if !hasValidConnectedness(ev.Connectedness) {
 					cab.addrBook.UpdateAddrs(ev.Peer, ConnectedAddrTTL, cab.recentlyConnectedTTL)
 					cab.capRelayAddrTTL(ev.Peer)
+					cab.noteAddrWrite(ev.Peer)
 				}
 			}
 		case <-probeTicker.C:
@@ -487,6 +517,7 @@ func (cab *cachedAddrBook) CacheAddrs(p peer.ID, addrs []types.Multiaddr) {
 	direct, relayAddrs := splitRelayAddrs(maddrs)
 	cab.addrBook.AddAddrs(p, direct, cab.recentlyConnectedTTL)
 	cab.addrBook.AddAddrs(p, relayAddrs, cab.relayAddrTTL)
+	cab.noteAddrWrite(p)
 }
 
 // Update the peer cache with information about a failed connection
