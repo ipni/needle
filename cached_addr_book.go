@@ -240,6 +240,11 @@ func newCachedAddrBook(opts ...AddrBookOption) (*cachedAddrBook, error) {
 	logger.Infof("Probing enabled: %t", cab.probingEnabled)
 	if cab.snapshotPath != "" {
 		logger.Infof("Address book snapshot: %s every %s", cab.snapshotPath, cab.snapshotInterval)
+		// Load after the options loop so the recentlyConnectedTTL and
+		// relayAddrTTL overrides are in effect when TTLs are reconstructed.
+		if _, _, err := cab.loadSnapshot(); err != nil {
+			logger.Warnf("failed to load address book snapshot: %v", err)
+		}
 	}
 	return cab, nil
 }

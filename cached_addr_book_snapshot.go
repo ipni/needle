@@ -26,12 +26,15 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 // snapshotFormatVersion is the version written in every snapshot's header
@@ -199,4 +202,110 @@ func (cab *cachedAddrBook) saveSnapshot(connected func(peer.ID) bool) error {
 
 	logger.Debugf("saved address book snapshot of %d peers to %s in %s", count, cab.snapshotPath, time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+// loadSnapshot loads a snapshot written by saveSnapshot into addrBook and
+// peerCache, so a restart resumes from the cached state instead of starting
+// cold. It returns 0, 0, nil when the snapshot is disabled or the file does
+// not exist yet. An unsupported version or a malformed header is an error
+// having added nothing; malformed entry lines are skipped and counted.
+//
+// Restored addrs are re-anchored to the peer's recorded write time: direct
+// addresses get recentlyConnectedTTL minus the age, relay addresses get
+// relayAddrTTL minus the age, and an addr whose TTL has already run out is
+// dropped. Restored addrs are unsigned: the next identify's ConsumePeerRecord
+// replaces them, and nothing in someguy reads certifications, so signed
+// envelopes are deliberately not persisted.
+//
+// pstoremem.AddAddrs drops unconnected addrs silently once the book holds
+// 1,000,000 of them, so a large restore may be truncated; addrs is the count
+// offered, not the count kept.
+func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
+	if cab.snapshotPath == "" {
+		return 0, 0, nil
+	}
+
+	f, err := os.Open(cab.snapshotPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("open snapshot %s: %w", cab.snapshotPath, err)
+	}
+	defer f.Close()
+
+	start := time.Now()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1 MiB max token
+
+	if !scanner.Scan() {
+		if scanner.Err() == nil {
+			return 0, 0, fmt.Errorf("snapshot %s has no header line", cab.snapshotPath)
+		}
+		return 0, 0, fmt.Errorf("read snapshot header: %w", scanner.Err())
+	}
+	var header snapshotHeader
+	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+		return 0, 0, fmt.Errorf("decode snapshot header: %w", err)
+	}
+	if header.Version != snapshotFormatVersion {
+		return 0, 0, fmt.Errorf("unsupported snapshot version %d, want %d", header.Version, snapshotFormatVersion)
+	}
+
+	now := start
+	var malformed int
+	for scanner.Scan() {
+		var entry snapshotEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			malformed++
+			continue
+		}
+		peers++
+
+		// Restore the state for every entry, including ones with no addrs:
+		// the failure backoff is what stops a restart from re-dialing every
+		// dead peer it has already given up on. lastAddrWrite is the file's
+		// Written, not now, so a later snapshot does not refresh entries that
+		// were already stale.
+		cab.peerCache.Add(entry.ID, peerState{
+			lastConnTime:       entry.LastConn,
+			lastFailedConnTime: entry.LastFail,
+			connectFailures:    entry.Failures,
+			lastAddrWrite:      entry.Written,
+		})
+
+		if entry.Written.IsZero() {
+			continue // no write time, so the addrs' TTLs cannot be reconstructed
+		}
+		age := now.Sub(entry.Written)
+
+		parsed := make([]ma.Multiaddr, 0, len(entry.Addrs))
+		for _, s := range entry.Addrs {
+			a, err := ma.NewMultiaddr(s)
+			if err != nil {
+				continue
+			}
+			parsed = append(parsed, a)
+		}
+		direct, relayAddrs := splitRelayAddrs(parsed)
+		if ttl := cab.recentlyConnectedTTL - age; ttl > 0 && len(direct) > 0 {
+			cab.addrBook.AddAddrs(entry.ID, direct, ttl)
+			addrs += len(direct)
+		}
+		if ttl := cab.relayAddrTTL - age; ttl > 0 && len(relayAddrs) > 0 {
+			cab.addrBook.AddAddrs(entry.ID, relayAddrs, ttl)
+			addrs += len(relayAddrs)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return peers, addrs, fmt.Errorf("read snapshot %s: %w", cab.snapshotPath, err)
+	}
+	if malformed > 0 {
+		logger.Warnf("skipped %d malformed line(s) in snapshot %s", malformed, cab.snapshotPath)
+	}
+
+	peerStateSize.Set(float64(cab.peerCache.Len())) // update metric
+	logger.Infof("restored address book snapshot: %d peers, %d addrs, snapshot age %s, load duration %s", peers, addrs, now.Sub(header.Time).Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
+	return peers, addrs, nil
 }
