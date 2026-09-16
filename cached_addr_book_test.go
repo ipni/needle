@@ -226,7 +226,7 @@ func TestBackground(t *testing.T) {
 
 	ctx, cancel = context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
-	go cab.background(ctx, mockHost)
+	go cab.background(ctx, mockHost, func(peer.ID) bool { return false })
 
 	// Create a test peer
 	testPeer, err := peer.Decode("12D3KooWCZ67sU8oCvKd82Y6c9NgpqgoZYuZEUcg4upHCjK3n1aj")

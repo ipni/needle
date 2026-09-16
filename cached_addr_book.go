@@ -271,7 +271,7 @@ func (cab *cachedAddrBook) releaseFindPeerSlot() {
 	findPeerLookupsInFlight.Dec()
 }
 
-func (cab *cachedAddrBook) background(ctx context.Context, host host.Host) {
+func (cab *cachedAddrBook) background(ctx context.Context, host host.Host, connected func(peer.ID) bool) {
 	sub, err := host.EventBus().Subscribe([]any{
 		&event.EvtPeerIdentificationCompleted{},
 		&event.EvtPeerConnectednessChanged{},
@@ -284,6 +284,13 @@ func (cab *cachedAddrBook) background(ctx context.Context, host host.Host) {
 
 	probeTicker := time.NewTicker(ProbeInterval)
 	defer probeTicker.Stop()
+
+	var snapshotCh <-chan time.Time
+	if cab.snapshotInterval > 0 {
+		snapshotTicker := time.NewTicker(cab.snapshotInterval)
+		defer snapshotTicker.Stop()
+		snapshotCh = snapshotTicker.C
+	}
 
 	for {
 		select {
@@ -352,6 +359,17 @@ func (cab *cachedAddrBook) background(ctx context.Context, host host.Host) {
 			logger.Debug("Starting to probe peers")
 			cab.isProbing.Store(true)
 			go cab.probePeers(ctx, host)
+		case <-snapshotCh:
+			if !cab.snapshotMu.TryLock() {
+				logger.Debug("Skipping address book snapshot, previous save still running")
+				continue
+			}
+			go func() {
+				defer cab.snapshotMu.Unlock()
+				if err := cab.saveSnapshotLocked(connected); err != nil {
+					logger.Errorw("saving cached addr book snapshot", "err", err)
+				}
+			}()
 		}
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/ipfs/boxo/routing/http/types"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/require"
 )
@@ -179,6 +181,47 @@ func TestSaveSnapshotAtomicSingleFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	require.Equal(t, "addrbook.snap", entries[0].Name())
+}
+
+func TestBackgroundSnapshotSavesOnInterval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cached-addr-book.ndjson")
+
+	eventBus := eventbus.NewBus()
+	mockHost := &mockHost{eventBus: eventBus}
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, 50*time.Millisecond))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go cab.background(ctx, mockHost, func(peer.ID) bool { return false })
+
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(path)
+		return statErr == nil
+	}, time.Second*3, time.Millisecond*50, "snapshot file was not written within the interval")
+}
+
+func TestSaveSnapshotConcurrentCallsBothComplete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cached-addr-book.ndjson")
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
+	require.NoError(t, err)
+	cab.CacheAddrs(genPeerID(t), []types.Multiaddr{{Multiaddr: ma.StringCast("/ip4/1.2.3.4/tcp/4001")}})
+
+	results := make(chan error, 2)
+	go func() {
+		results <- cab.saveSnapshot(func(peer.ID) bool { return false })
+	}()
+	results <- cab.saveSnapshot(func(peer.ID) bool { return false })
+
+	require.NoError(t, <-results)
+	require.NoError(t, <-results)
+
+	_, statErr := os.Stat(path)
+	require.NoError(t, statErr)
 }
 
 // writeSnapshotFile writes a snapshot by hand: a header line, then one

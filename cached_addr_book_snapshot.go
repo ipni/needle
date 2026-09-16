@@ -35,12 +35,64 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // snapshotFormatVersion is the version written in every snapshot's header
 // line. Bump it when the on-disk format changes in a way restore must handle
 // differently; restore rejects versions it does not understand.
 const snapshotFormatVersion = 1
+
+const (
+	snapshotOp     = "op"
+	snapshotOpSave = "save"
+	snapshotOpLoad = "load"
+)
+
+var (
+	snapshotDurationSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_duration_seconds",
+		Namespace: name,
+		Subsystem: Subsystem,
+		Help:      "Duration of the last address book snapshot save in seconds",
+	})
+
+	snapshotPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_peers",
+		Namespace: name,
+		Subsystem: Subsystem,
+		Help:      "Number of peers in the last successful address book snapshot",
+	})
+
+	snapshotLastSuccessTimestampSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_last_success_timestamp_seconds",
+		Namespace: name,
+		Subsystem: Subsystem,
+		Help:      "Unix timestamp of the last successful address book snapshot save",
+	})
+
+	snapshotRestoredPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_restored_peers",
+		Namespace: name,
+		Subsystem: Subsystem,
+		Help:      "Number of peers restored from the address book snapshot at startup",
+	})
+
+	snapshotRestoredAddrs = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_restored_addrs",
+		Namespace: name,
+		Subsystem: Subsystem,
+		Help:      "Number of addresses offered to the address book when restoring the snapshot at startup",
+	})
+
+	snapshotErrorsCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name:      "snapshot_errors",
+		Namespace: name,
+		Subsystem: Subsystem,
+		Help:      "Number of failed address book snapshot operations",
+	}, []string{snapshotOp})
+)
 
 // snapshotHeader is the first line of a snapshot.
 type snapshotHeader struct {
@@ -112,8 +164,19 @@ func (cab *cachedAddrBook) saveSnapshot(connected func(peer.ID) bool) error {
 
 	cab.snapshotMu.Lock()
 	defer cab.snapshotMu.Unlock()
+	return cab.saveSnapshotLocked(connected)
+}
 
+// saveSnapshotLocked runs the snapshot save and updates the snapshot metrics.
+// Callers must hold snapshotMu.
+func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err error) {
 	start := time.Now()
+	defer func() {
+		snapshotDurationSeconds.Set(time.Since(start).Seconds())
+		if err != nil {
+			snapshotErrorsCounter.WithLabelValues(snapshotOpSave).Inc()
+		}
+	}()
 
 	// The union of peers with addrs and peers with tracked state: a peer can
 	// be in peerCache without addrs (e.g. only failure history) and vice
@@ -200,7 +263,9 @@ func (cab *cachedAddrBook) saveSnapshot(connected func(peer.ID) bool) error {
 		return fmt.Errorf("rename snapshot into place: %w", err)
 	}
 
-	logger.Debugf("saved address book snapshot of %d peers to %s in %s", count, cab.snapshotPath, time.Since(start).Round(time.Millisecond))
+	snapshotPeers.Set(float64(count))
+	snapshotLastSuccessTimestampSeconds.Set(float64(time.Now().Unix()))
+	logger.Infof("saved address book snapshot of %d peers to %s in %s", count, cab.snapshotPath, time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
@@ -227,6 +292,15 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 	if cab.snapshotPath == "" {
 		return 0, 0, nil
 	}
+
+	defer func() {
+		if err != nil {
+			snapshotErrorsCounter.WithLabelValues(snapshotOpLoad).Inc()
+			return
+		}
+		snapshotRestoredPeers.Set(float64(peers))
+		snapshotRestoredAddrs.Set(float64(addrs))
+	}()
 
 	f, err := os.Open(cab.snapshotPath)
 	if err != nil {

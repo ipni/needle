@@ -68,6 +68,12 @@ func main() {
 						EnvVars:     []string{"SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS"},
 						Usage:       "maximum background FindPeer lookups running at once for provider records that arrive without addresses",
 					},
+					&cli.DurationFlag{
+						Name:    "cached-addr-book-snapshot-interval",
+						Value:   0,
+						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL"},
+						Usage:   "how often to snapshot the cached address book to <datadir>/cached-addr-book.ndjson so a restart starts warm; 0 disables",
+					},
 					&cli.StringFlag{
 						Name:    "dnsaddr-resolution",
 						Value:   string(DNSAddrResolutionAppend),
@@ -224,17 +230,23 @@ func main() {
 					if err != nil {
 						return err
 					}
+					snapshotPath, snapshotInterval, err := snapshotFlagConfig(ctx.String("datadir"), ctx.Duration("cached-addr-book-snapshot-interval"))
+					if err != nil {
+						return err
+					}
 					cfg := &config{
-						listenAddress:               ctx.String("listen-address"),
-						dhtType:                     ctx.String("dht"),
-						cachedAddrBook:              ctx.Bool("cached-addr-book"),
-						cachedAddrBookActiveProbing: ctx.Bool("cached-addr-book-active-probing"),
-						cachedAddrBookRecentTTL:     ctx.Duration("cached-addr-book-recent-ttl"),
-						cachedAddrBookMaxFindPeers:  ctx.Int("cached-addr-book-max-concurrent-find-peers"),
-						routingTimeout:              ctx.Duration("routing-timeout"),
-						dnsAddrResolution:           dnsAddrResolution,
-						recordsLimit:                recordsLimit,
-						streamingRecordsLimit:       streamingRecordsLimit,
+						listenAddress:                  ctx.String("listen-address"),
+						dhtType:                        ctx.String("dht"),
+						cachedAddrBook:                 ctx.Bool("cached-addr-book"),
+						cachedAddrBookActiveProbing:    ctx.Bool("cached-addr-book-active-probing"),
+						cachedAddrBookRecentTTL:        ctx.Duration("cached-addr-book-recent-ttl"),
+						cachedAddrBookMaxFindPeers:     ctx.Int("cached-addr-book-max-concurrent-find-peers"),
+						cachedAddrBookSnapshotPath:     snapshotPath,
+						cachedAddrBookSnapshotInterval: snapshotInterval,
+						routingTimeout:                 ctx.Duration("routing-timeout"),
+						dnsAddrResolution:              dnsAddrResolution,
+						recordsLimit:                   recordsLimit,
+						streamingRecordsLimit:          streamingRecordsLimit,
 
 						contentEndpoints:       ctx.StringSlice("provider-endpoints"),
 						peerEndpoints:          ctx.StringSlice("peer-endpoints"),
@@ -263,6 +275,9 @@ func main() {
 					fmt.Printf("Starting %s %s\n", name, version)
 
 					fmt.Printf("SOMEGUY_DHT = %s\n", cfg.dhtType)
+					if cfg.cachedAddrBookSnapshotInterval > 0 {
+						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL = %s\n", cfg.cachedAddrBookSnapshotInterval)
+					}
 					printIfListConfigured("SOMEGUY_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
 					printIfListConfigured("SOMEGUY_PEER_ENDPOINTS = ", cfg.peerEndpoints)
 					printIfListConfigured("SOMEGUY_IPNS_ENDPOINTS = ", cfg.ipnsEndpoints)
@@ -481,6 +496,23 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// snapshotFlagConfig validates the snapshot flags and derives the snapshot
+// path. An interval of 0 disables the snapshot and leaves the path empty; a
+// positive interval requires datadir, because the snapshot is written to
+// <datadir>/cached-addr-book.ndjson.
+func snapshotFlagConfig(datadir string, interval time.Duration) (path string, enabled time.Duration, err error) {
+	if interval < 0 {
+		return "", 0, fmt.Errorf("cached-addr-book-snapshot-interval must be non-negative, got %s", interval)
+	}
+	if interval == 0 {
+		return "", 0, nil
+	}
+	if datadir == "" {
+		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --datadir is empty; the snapshot is written to <datadir>/cached-addr-book.ndjson, so set --datadir (SOMEGUY_DATADIR) too, or set --cached-addr-book-snapshot-interval to 0 to disable it")
+	}
+	return filepath.Join(datadir, "cached-addr-book.ndjson"), interval, nil
 }
 
 func printIfListConfigured(message string, list []string) {

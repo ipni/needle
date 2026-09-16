@@ -108,16 +108,18 @@ const (
 )
 
 type config struct {
-	listenAddress               string
-	dhtType                     string
-	cachedAddrBook              bool
-	cachedAddrBookActiveProbing bool
-	cachedAddrBookRecentTTL     time.Duration
-	cachedAddrBookMaxFindPeers  int
-	routingTimeout              time.Duration
-	dnsAddrResolution           DNSAddrResolution
-	recordsLimit                int
-	streamingRecordsLimit       int
+	listenAddress                  string
+	dhtType                        string
+	cachedAddrBook                 bool
+	cachedAddrBookActiveProbing    bool
+	cachedAddrBookRecentTTL        time.Duration
+	cachedAddrBookMaxFindPeers     int
+	cachedAddrBookSnapshotPath     string
+	cachedAddrBookSnapshotInterval time.Duration
+	routingTimeout                 time.Duration
+	dnsAddrResolution              DNSAddrResolution
+	recordsLimit                   int
+	streamingRecordsLimit          int
 
 	contentEndpoints       []string
 	peerEndpoints          []string
@@ -189,6 +191,8 @@ func start(ctx context.Context, cfg *config) error {
 
 	var cachedAddrBook *cachedAddrBook
 
+	connected := func(p peer.ID) bool { return hasValidConnectedness(h.Network().Connectedness(p)) }
+
 	if cfg.cachedAddrBook && dhtRouting != nil {
 		fmt.Printf("Using cached address book to speed up provider discovery (active probing enabled: %t)\n", cfg.cachedAddrBookActiveProbing)
 		opts := []AddrBookOption{}
@@ -203,6 +207,10 @@ func start(ctx context.Context, cfg *config) error {
 
 		opts = append(opts, WithActiveProbing(cfg.cachedAddrBookActiveProbing))
 
+		if cfg.cachedAddrBookSnapshotInterval > 0 {
+			opts = append(opts, WithSnapshot(cfg.cachedAddrBookSnapshotPath, cfg.cachedAddrBookSnapshotInterval))
+		}
+
 		// Let the cache fall back to the host peerstore, which the DHT
 		// populates with provider addresses during FindProviders.
 		opts = append(opts, WithHostPeerstore(h.Peerstore()))
@@ -211,7 +219,7 @@ func start(ctx context.Context, cfg *config) error {
 		if err != nil {
 			return err
 		}
-		go cachedAddrBook.background(ctx, h)
+		go cachedAddrBook.background(ctx, h, connected)
 	}
 
 	var blockProviderRouters []router
@@ -366,6 +374,14 @@ func start(ctx context.Context, cfg *config) error {
 
 	go server.Close()
 	wg.Wait()
+
+	// Final snapshot so a restart resumes from the most recent state.
+	// saveSnapshot returns nil when the snapshot is disabled.
+	if cachedAddrBook != nil {
+		if err := cachedAddrBook.saveSnapshot(connected); err != nil {
+			logger.Errorw("saving cached addr book snapshot", "err", err)
+		}
+	}
 
 	// The DHT constructors stopped taking a context in
 	// go-libp2p-kad-dht v0.42.0, so cancelling ctx no longer stops them.
