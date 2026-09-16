@@ -376,10 +376,14 @@ func start(ctx context.Context, cfg *config) error {
 	wg.Wait()
 
 	// Final snapshot so a restart resumes from the most recent state.
-	// saveSnapshot returns nil when the snapshot is disabled.
-	if cachedAddrBook != nil {
-		if err := cachedAddrBook.saveSnapshot(connected); err != nil {
+	// TryLock, not Lock: a periodic save holding the lock has already
+	// produced a recent snapshot, and the shutdown save must never wait it
+	// out against the deployment's grace budget.
+	if cachedAddrBook != nil && cfg.cachedAddrBookSnapshotInterval > 0 {
+		if saved, err := cachedAddrBook.saveSnapshotIfFree(connected); err != nil {
 			logger.Errorw("saving cached addr book snapshot", "err", err)
+		} else if !saved {
+			logger.Info("skipping final address book snapshot, a periodic save is still running; its snapshot is recent enough for a warm restart")
 		}
 	}
 

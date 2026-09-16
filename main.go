@@ -230,7 +230,7 @@ func main() {
 					if err != nil {
 						return err
 					}
-					snapshotPath, snapshotInterval, err := snapshotFlagConfig(ctx.String("datadir"), ctx.Duration("cached-addr-book-snapshot-interval"))
+					snapshotPath, snapshotInterval, err := snapshotFlagConfig(ctx.String("datadir"), ctx.Bool("cached-addr-book"), ctx.String("dht"), ctx.Duration("cached-addr-book-snapshot-interval"))
 					if err != nil {
 						return err
 					}
@@ -501,13 +501,20 @@ func main() {
 // snapshotFlagConfig validates the snapshot flags and derives the snapshot
 // path. An interval of 0 disables the snapshot and leaves the path empty; a
 // positive interval requires datadir, because the snapshot is written to
-// <datadir>/cached-addr-book.ndjson.
-func snapshotFlagConfig(datadir string, interval time.Duration) (path string, enabled time.Duration, err error) {
+// <datadir>/cached-addr-book.ndjson, and a cached address book, which only
+// exists when --cached-addr-book is enabled and a DHT is not disabled.
+func snapshotFlagConfig(datadir string, cachedAddrBook bool, dhtType string, interval time.Duration) (path string, enabled time.Duration, err error) {
 	if interval < 0 {
 		return "", 0, fmt.Errorf("cached-addr-book-snapshot-interval must be non-negative, got %s", interval)
 	}
 	if interval == 0 {
 		return "", 0, nil
+	}
+	if !cachedAddrBook {
+		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --cached-addr-book is disabled, so the snapshot would never be written; enable --cached-addr-book (SOMEGUY_CACHED_ADDR_BOOK) or set --cached-addr-book-snapshot-interval to 0 to disable the snapshot")
+	}
+	if dhtType == "disabled" {
+		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --dht is disabled; the cached address book only exists with a DHT, so enable one (SOMEGUY_DHT) or set --cached-addr-book-snapshot-interval to 0 to disable the snapshot")
 	}
 	if datadir == "" {
 		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --datadir is empty; the snapshot is written to <datadir>/cached-addr-book.ndjson, so set --datadir (SOMEGUY_DATADIR) too, or set --cached-addr-book-snapshot-interval to 0 to disable it")

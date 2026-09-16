@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,16 +212,73 @@ func TestSaveSnapshotConcurrentCallsBothComplete(t *testing.T) {
 	require.NoError(t, err)
 	cab.CacheAddrs(genPeerID(t), []types.Multiaddr{{Multiaddr: ma.StringCast("/ip4/1.2.3.4/tcp/4001")}})
 
+	// Both saves start together, so the second is guaranteed to contend for
+	// the lock: the lock serializes, it does not drop.
+	start := make(chan struct{})
 	results := make(chan error, 2)
-	go func() {
-		results <- cab.saveSnapshot(func(peer.ID) bool { return false })
-	}()
-	results <- cab.saveSnapshot(func(peer.ID) bool { return false })
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- cab.saveSnapshot(func(peer.ID) bool { return false })
+		}()
+	}
+	close(start)
+	wg.Wait()
 
 	require.NoError(t, <-results)
 	require.NoError(t, <-results)
 
-	_, statErr := os.Stat(path)
+	// Contending saves leave exactly the snapshot in place, no temp behind.
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	require.Equal(t, []string{"cached-addr-book.ndjson"}, names)
+}
+
+func TestSaveSnapshotIfFreeSkipsWhenLocked(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cached-addr-book.ndjson")
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
+	require.NoError(t, err)
+
+	cab.snapshotMu.Lock()
+	saved, err := cab.saveSnapshotIfFree(func(peer.ID) bool { return false })
+	cab.snapshotMu.Unlock()
+	require.NoError(t, err)
+	require.False(t, saved)
+
+	saved, err = cab.saveSnapshotIfFree(func(peer.ID) bool { return false })
+	require.NoError(t, err)
+	require.True(t, saved)
+}
+
+func TestLoadSnapshotSweepsOrphanedTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cached-addr-book.ndjson")
+
+	orphan := filepath.Join(dir, ".cached-addr-book-12345.tmp")
+	keep := filepath.Join(dir, "unrelated.txt")
+	require.NoError(t, os.WriteFile(orphan, []byte("partial"), 0o600))
+	require.NoError(t, os.WriteFile(keep, []byte("keep"), 0o600))
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
+	require.NoError(t, err)
+
+	peers, addrs, err := cab.loadSnapshot()
+	require.NoError(t, err)
+	require.Zero(t, peers)
+	require.Zero(t, addrs)
+
+	_, statErr := os.Stat(orphan)
+	require.True(t, os.IsNotExist(statErr))
+	_, statErr = os.Stat(keep)
 	require.NoError(t, statErr)
 }
 

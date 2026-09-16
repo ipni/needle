@@ -50,6 +50,11 @@ const (
 	snapshotOpLoad = "load"
 )
 
+// snapshotTempPattern names the temp file a save writes before renaming it
+// into place. A hard exit mid-save orphans it, so loadSnapshot sweeps
+// matches from the snapshot directory.
+const snapshotTempPattern = ".cached-addr-book-*.tmp"
+
 var (
 	snapshotDurationSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name:      "snapshot_duration_seconds",
@@ -167,8 +172,27 @@ func (cab *cachedAddrBook) saveSnapshot(connected func(peer.ID) bool) error {
 	return cab.saveSnapshotLocked(connected)
 }
 
+// saveSnapshotIfFree saves the snapshot without waiting for the lock: a
+// caller on a shutdown deadline skips rather than blocks behind a periodic
+// save, which has already produced a recent snapshot. It reports whether a
+// save ran; err is nil when no save ran.
+func (cab *cachedAddrBook) saveSnapshotIfFree(connected func(peer.ID) bool) (bool, error) {
+	if cab.snapshotPath == "" {
+		return false, nil
+	}
+	if !cab.snapshotMu.TryLock() {
+		return false, nil
+	}
+	defer cab.snapshotMu.Unlock()
+	err := cab.saveSnapshotLocked(connected)
+	return err == nil, err
+}
+
 // saveSnapshotLocked runs the snapshot save and updates the snapshot metrics.
-// Callers must hold snapshotMu.
+// Callers must hold snapshotMu. It does not check that the snapshot is
+// enabled: it relies on the invariant that WithSnapshot is the sole setter
+// of snapshotPath and snapshotInterval and rejects an empty path, so
+// snapshotInterval > 0 implies snapshotPath != "".
 func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err error) {
 	start := time.Now()
 	defer func() {
@@ -194,7 +218,7 @@ func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err
 		return fmt.Errorf("create snapshot directory %s: %w", dir, err)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".cached-addr-book-*.tmp")
+	tmp, err := os.CreateTemp(dir, snapshotTempPattern)
 	if err != nil {
 		return fmt.Errorf("create temp snapshot file: %w", err)
 	}
@@ -271,10 +295,13 @@ func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err
 
 // loadSnapshot loads a snapshot written by saveSnapshot into addrBook and
 // peerCache, so a restart resumes from the cached state instead of starting
-// cold. It returns 0, 0, nil when the snapshot is disabled or the file does
-// not exist yet. An unsupported version or a malformed header is an error
-// having added nothing; malformed entry lines, including ones with no id,
-// are skipped and counted. A line over the scanner's token limit stops the
+// cold. It first removes orphaned temp files matching snapshotTempPattern,
+// which a hard exit mid-save leaves behind; those removals log their
+// failures but never fail the load. It returns 0, 0, nil when the snapshot
+// is disabled or the file does not exist yet. An unsupported version or a
+// malformed header is an error having added nothing; malformed entry lines,
+// including ones with no id, are skipped and counted. A line over the
+// scanner's token limit stops the
 // scan: that error returns the counts loaded so far with the entries read
 // so far already applied to addrBook and peerCache.
 //
@@ -292,6 +319,8 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 	if cab.snapshotPath == "" {
 		return 0, 0, nil
 	}
+
+	sweepOrphanedSnapshotTemps(cab.snapshotPath)
 
 	defer func() {
 		if err != nil {
@@ -394,4 +423,31 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 
 	logger.Infof("restored address book snapshot: %d peers, %d addrs, snapshot age %s, load duration %s", peers, addrs, now.Sub(header.Time).Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
 	return peers, addrs, nil
+}
+
+// sweepOrphanedSnapshotTemps removes temp files matching snapshotTempPattern
+// from the directory holding snapshotPath. A save writes its snapshot to a
+// temp file and renames it into place, so any matching file present at
+// startup was orphaned by a hard exit mid-save; each is a full-size
+// snapshot, and unclean restarts would accumulate them. Failures are logged,
+// not returned: a stale temp file must not block startup.
+func sweepOrphanedSnapshotTemps(snapshotPath string) {
+	dir := filepath.Dir(snapshotPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Warnf("sweeping orphaned snapshot temp files from %s: %v", dir, err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		orphan, _ := filepath.Match(snapshotTempPattern, e.Name())
+		if !orphan {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			logger.Warnf("removing orphaned snapshot temp file %s: %v", e.Name(), err)
+		}
+	}
 }

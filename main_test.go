@@ -10,28 +10,40 @@ import (
 
 func TestSnapshotFlagConfig(t *testing.T) {
 	t.Run("zero interval disables without a datadir", func(t *testing.T) {
-		path, interval, err := snapshotFlagConfig("", 0)
+		path, interval, err := snapshotFlagConfig("", true, "accelerated", 0)
 		require.NoError(t, err)
 		require.Empty(t, path)
 		require.Zero(t, interval)
 	})
 
+	t.Run("positive interval with the cached addr book disabled is rejected", func(t *testing.T) {
+		_, _, err := snapshotFlagConfig("/var/lib/someguy", false, "accelerated", time.Minute)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--cached-addr-book")
+	})
+
+	t.Run("positive interval with the DHT disabled is rejected", func(t *testing.T) {
+		_, _, err := snapshotFlagConfig("/var/lib/someguy", true, "disabled", time.Minute)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--dht")
+	})
+
 	t.Run("positive interval requires a datadir", func(t *testing.T) {
-		_, _, err := snapshotFlagConfig("", time.Minute)
+		_, _, err := snapshotFlagConfig("", true, "accelerated", time.Minute)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "--cached-addr-book-snapshot-interval")
 		require.Contains(t, err.Error(), "--datadir")
 	})
 
 	t.Run("positive interval with a datadir derives the path", func(t *testing.T) {
-		path, interval, err := snapshotFlagConfig("/var/lib/someguy", time.Minute)
+		path, interval, err := snapshotFlagConfig("/var/lib/someguy", true, "accelerated", time.Minute)
 		require.NoError(t, err)
 		require.Equal(t, filepath.Join("/var/lib/someguy", "cached-addr-book.ndjson"), path)
 		require.Equal(t, time.Minute, interval)
 	})
 
 	t.Run("negative interval is rejected", func(t *testing.T) {
-		_, _, err := snapshotFlagConfig("/var/lib/someguy", -time.Minute)
+		_, _, err := snapshotFlagConfig("/var/lib/someguy", true, "accelerated", -time.Minute)
 		require.Error(t, err)
 	})
 }
