@@ -15,6 +15,8 @@ The following emojis are used to highlight certain changes:
 
 ### Added
 
+- Optional, off-by-default on-disk snapshot of the cached address book via `SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL` (requires `SOMEGUY_DATADIR`): written to `<datadir>/cached-addr-book.ndjson` on an interval and on a clean shutdown, and restored at startup so a restart serves cached addresses immediately instead of refilling the cache over about an hour. See [`docs/peer-address-caching.md`](https://github.com/ipfs/someguy/blob/main/docs/peer-address-caching.md).
+
 ### Changed
 
 - [boxo v0.42.2](https://github.com/ipfs/boxo/releases/tag/v0.42.2)

@@ -233,7 +233,26 @@ client is actively waiting on. The direct path has a different weakness worth
 knowing: it consults no backoff, so a repeated request for an unresolvable peer
 pays a fresh DHT walk every time.
 
-### Nothing is persisted across restarts
+### Almost nothing is persisted across restarts
+
+The exception is an optional, off-by-default snapshot of the cached address
+book, written to `<datadir>/cached-addr-book.ndjson` on an interval and again
+on a clean shutdown, and restored before someguy serves its first request. It
+is a snapshot rather than a datastore-backed peerstore: psstoreds is
+deprecated, it adds a datastore write per address update, and its
+`PeersWithAddrs` scans the whole store on every probe tick, while the snapshot
+writes one file on a timer and reads nothing in the hot path. The snapshot
+stores each address with the time its peer's addresses were last written, so
+restore reconstructs the TTLs: direct addresses get the recently-connected
+TTL minus the elapsed time, relay addresses the shorter relay TTL, and an
+address whose TTL has already run out is dropped. Because the book union-adds
+addresses, a peer's set can hold addresses from several write times, and
+restore re-anchors all of them to the last one. The over-extension is bounded
+by the TTL itself: an address older than its TTL is already gone from the book
+at snapshot time, and the next identify or probe re-confirms or evicts each
+address, so the skew ages out quickly. The snapshot also restores the probe
+backoff state, so a restart does not re-dial peers someguy has already given
+up on.
 
 someguy passes no datastore to the DHT, so value records, including IPNS
 records written through `PUT /routing/v1/ipns/{name}`, live in memory and are

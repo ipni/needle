@@ -23,7 +23,15 @@ When Someguy aggregates other `/routing/v1` endpoints, `boxo/routing/http/client
 - `someguy_cached_addr_book_probe_duration_seconds_[bucket|sum|count]`: histogram of peer-probing duration in seconds
 - `someguy_cached_addr_book_probed_peers{result}`: counter of probed peers, labeled `online` or `offline`
 - `someguy_cached_addr_book_peer_state_size`: gauge of peers currently tracked in peer state
+- `someguy_cached_addr_book_snapshot_duration_seconds`: gauge of the duration of the last address book snapshot save attempt in seconds
+- `someguy_cached_addr_book_snapshot_peers`: gauge of peers in the last successful address book snapshot
+- `someguy_cached_addr_book_snapshot_last_success_timestamp_seconds`: gauge of the Unix timestamp of the last successful address book snapshot save
+- `someguy_cached_addr_book_snapshot_restored_peers`: gauge of peers restored from the address book snapshot at startup
+- `someguy_cached_addr_book_snapshot_restored_addrs`: gauge of addresses offered to the address book when restoring the snapshot at startup
+- `someguy_cached_addr_book_snapshot_errors{op}`: counter of failed address book snapshot operations, labeled `save` or `load`
 - `someguy_cached_router_peer_addr_lookups{cache,origin}`: counter of peer address-info lookups per origin and cache state
+
+The five snapshot gauges read `0` while the address book snapshot is disabled (`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL` at `0`). The errors counter has no `_total` suffix (matching `probed_peers`), and each of its `op` series only appears after the first error of that kind, so alerts must handle the absent series.
 
 ### Background peer lookups
 

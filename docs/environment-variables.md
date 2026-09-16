@@ -9,6 +9,7 @@ The environment variables below override `someguy`'s built-in defaults.
   - [`SOMEGUY_CACHED_ADDR_BOOK_RECENT_TTL`](#someguy_cached_addr_book_recent_ttl)
   - [`SOMEGUY_CACHED_ADDR_BOOK_ACTIVE_PROBING`](#someguy_cached_addr_book_active_probing)
   - [`SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS`](#someguy_cached_addr_book_max_concurrent_find_peers)
+  - [`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`](#someguy_cached_addr_book_snapshot_interval)
   - [`SOMEGUY_DNSADDR_RESOLUTION`](#someguy_dnsaddr_resolution)
   - [`SOMEGUY_ROUTING_TIMEOUT`](#someguy_routing_timeout)
   - [`SOMEGUY_RECORDS_LIMIT`](#someguy_records_limit)
@@ -75,6 +76,20 @@ Maximum background `FindPeer` lookups that run at once. Someguy starts one of th
 Raise this only if `someguy_cached_router_find_peer_lookups_rejected` keeps increasing. See [metrics.md](metrics.md) and [peer-address-caching.md](peer-address-caching.md).
 
 Default: `512`
+
+### `SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`
+
+How often to write the cached address book to `<datadir>/cached-addr-book.ndjson`. Someguy restores the snapshot at startup, so a restart serves cached addresses immediately instead of the cache refilling over about an hour.
+
+The restore is synchronous and finishes before the HTTP listener is up: about 1.76 s per 200,000 peers on local SSD, so a cache at the 1,000,000-peer cap adds roughly 9 s to startup, which health-check and readiness timeouts must cover. The file is about 260 bytes per peer, around 250 MiB at that cap, so `SOMEGUY_DATADIR` needs headroom for it.
+
+The snapshot holds the addresses with their TTLs, reconstructed from the time each peer's addresses were last written, and the probe backoff state, so a restart does not re-dial peers Someguy has already given up on. It does not hold signed peer records (re-learned on the next identify), the accelerated DHT routing table (crawled again on start), or the host peerstore.
+
+The periodic write is the guarantee: a clean shutdown writes one more time, but an OOM kill skips shutdown, so the interval bounds how stale a restart can be.
+
+Requires `SOMEGUY_DATADIR`, because the snapshot is written to `<datadir>/cached-addr-book.ndjson`. Someguy refuses to start if this is set while `SOMEGUY_CACHED_ADDR_BOOK` is disabled or `SOMEGUY_DHT` is `disabled`, since the snapshot could never be written. Watch the saves and the restore with the `someguy_cached_addr_book_snapshot_*` metrics in [metrics.md](metrics.md) and [peer-address-caching.md](peer-address-caching.md).
+
+Default: `0` (disabled)
 
 ### `SOMEGUY_DNSADDR_RESOLUTION`
 
