@@ -208,7 +208,10 @@ func (cab *cachedAddrBook) saveSnapshot(connected func(peer.ID) bool) error {
 // peerCache, so a restart resumes from the cached state instead of starting
 // cold. It returns 0, 0, nil when the snapshot is disabled or the file does
 // not exist yet. An unsupported version or a malformed header is an error
-// having added nothing; malformed entry lines are skipped and counted.
+// having added nothing; malformed entry lines, including ones with no id,
+// are skipped and counted. A line over the scanner's token limit stops the
+// scan: that error returns the counts loaded so far with the entries read
+// so far already applied to addrBook and peerCache.
 //
 // Restored addrs are re-anchored to the peer's recorded write time: direct
 // addresses get recentlyConnectedTTL minus the age, relay addresses get
@@ -261,6 +264,12 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 			malformed++
 			continue
 		}
+		// An absent id decodes to the zero peer.ID rather than a JSON error,
+		// so reject it here: it would claim an LRU slot and skew the counts.
+		if entry.ID == "" {
+			malformed++
+			continue
+		}
 		peers++
 
 		// Restore the state for every entry, including ones with no addrs:
@@ -298,14 +307,17 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 			addrs += len(relayAddrs)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return peers, addrs, fmt.Errorf("read snapshot %s: %w", cab.snapshotPath, err)
-	}
+	// Update the gauge before the scanner error return: a scanner error
+	// (e.g. a line over the token limit) leaves the entries read so far in
+	// peerCache, so the gauge must reflect them even on that path.
+	peerStateSize.Set(float64(cab.peerCache.Len())) // update metric
 	if malformed > 0 {
 		logger.Warnf("skipped %d malformed line(s) in snapshot %s", malformed, cab.snapshotPath)
 	}
+	if err := scanner.Err(); err != nil {
+		return peers, addrs, fmt.Errorf("read snapshot %s: %w", cab.snapshotPath, err)
+	}
 
-	peerStateSize.Set(float64(cab.peerCache.Len())) // update metric
 	logger.Infof("restored address book snapshot: %d peers, %d addrs, snapshot age %s, load duration %s", peers, addrs, now.Sub(header.Time).Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
 	return peers, addrs, nil
 }

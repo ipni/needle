@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -231,6 +232,13 @@ func TestLoadSnapshotRoundTrip(t *testing.T) {
 	cab2, err := newCachedAddrBook(opts...)
 	require.NoError(t, err)
 
+	// The constructor discards the load counts; assert the contract Task 3
+	// wraps in metrics directly (the reload is idempotent).
+	peers, addrs, err := cab2.loadSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, 3, peers)
+	require.Equal(t, 2, addrs)
+
 	require.Equal(t, []string{directAddr.String()}, maStrings(cab2.addrBook.Addrs(directPeer)))
 	require.Equal(t, []string{relayAddr.String()}, maStrings(cab2.addrBook.Addrs(relayPeer)))
 	require.Empty(t, cab2.addrBook.Addrs(failedPeer))
@@ -305,6 +313,38 @@ func TestLoadSnapshotMissingFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, peers)
 	require.Zero(t, addrs)
+}
+
+func TestLoadSnapshotSkipsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "addrbook.snap")
+
+	p := genPeerID(t)
+	header, err := json.Marshal(snapshotHeader{Version: snapshotFormatVersion, Time: time.Now()})
+	require.NoError(t, err)
+	entry, err := json.Marshal(snapshotEntry{
+		ID:      p,
+		Addrs:   []string{"/ip4/1.2.3.4/tcp/4001"},
+		Written: time.Now(),
+	})
+	require.NoError(t, err)
+
+	// A garbage line and an entry missing its id, around one valid entry.
+	content := fmt.Sprintf("%s\nnot json\n{\"a\":[\"/ip4/9.9.9.9/tcp/4001\"]}\n%s\n", header, entry)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
+	require.NoError(t, err)
+
+	// A malformed line is skipped, not fatal: the valid entry still loads,
+	// and the id-less entry claimed no LRU slot.
+	require.Equal(t, []string{"/ip4/1.2.3.4/tcp/4001"}, maStrings(cab.addrBook.Addrs(p)))
+	require.Equal(t, 1, cab.peerCache.Len())
+
+	peers, addrs, err := cab.loadSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, 1, peers)
+	require.Equal(t, 1, addrs)
 }
 
 func TestLoadSnapshotCorrupt(t *testing.T) {
