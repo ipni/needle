@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	drclient "github.com/ipfs/boxo/routing/http/client"
 	"github.com/ipfs/boxo/routing/http/types"
@@ -31,6 +32,9 @@ var _ router = clientRouter{}
 
 type clientRouter struct {
 	*drclient.Client
+	// name labels this endpoint in the parallel router's metrics and trace
+	// line. drclient.Client does not keep the base URL, so it is kept here.
+	name string
 }
 
 func (d clientRouter) FindProviders(ctx context.Context, cid cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
@@ -39,6 +43,18 @@ func (d clientRouter) FindProviders(ctx context.Context, cid cid.Cid, limit int)
 
 func (d clientRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
 	return d.Client.FindPeers(ctx, pid)
+}
+
+// endpointLabel reduces a delegated endpoint's base URL to its host, which is
+// what identifies it in metrics. The label set stays one per configured
+// endpoint, so the host is enough and the path would only add noise. A URL
+// that does not parse, or carries no host, is used whole rather than dropped -
+// an unlabelled router would be worse than an ugly label.
+func endpointLabel(baseURL string) string {
+	if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return baseURL
 }
 
 // newDelegatedRoutingClient creates an HTTP delegated routing client with consistent options
@@ -128,7 +144,7 @@ func createDelegatedHTTPRouters(cfg *config) (providers, peers, ipns []router, e
 		}
 
 		// Wrap in clientRouter - this implements all routing interfaces
-		router := clientRouter{Client: client}
+		router := clientRouter{Client: client, name: endpointLabel(endpoint.baseURL)}
 
 		// Add the same router instance to appropriate lists based on capabilities
 		if endpoint.providers {

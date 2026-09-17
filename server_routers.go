@@ -23,6 +23,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/routing"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type router interface {
@@ -100,25 +102,364 @@ func (r composableRouter) ProvideBitswap(ctx context.Context, req *server.Bitswa
 	return 0, routing.ErrNotSupported
 }
 
+// Per-router timing for the parallel router.
+//
+// Every record and every router completion already passes through manyIter's
+// forwarding goroutines, so that is where all of this is measured. Nothing
+// about what is forwarded, or when, changes: the instrumentation only reads
+// the clock and counts.
+const (
+	routerOpProviders = "providers"
+	routerOpPeers     = "peers"
+	routerOpClosest   = "closest"
+
+	// A router is "exhausted" when its iterator ran out, "cancelled" when the
+	// request ended under it - the records limit was reached, or the client
+	// went away.
+	routerDoneExhausted = "exhausted"
+	routerDoneCancelled = "cancelled"
+)
+
+// routerTimingBuckets spans the range these lookups actually live in: a
+// delegated HTTP round trip is tens of milliseconds, a DHT walk runs to the
+// 5s fullrt timeout.
+var routerTimingBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 7.5, 10}
+
+var (
+	// routerFirstResult answers "when does this router start producing", which
+	// is what a cut-the-slow-router-off policy would be set from.
+	routerFirstResult = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:      "first_result_seconds",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Time from the start of a parallel routing request to a router's first forwarded record. Only observed for routers that produced at least one record",
+		Buckets:   routerTimingBuckets,
+	}, []string{"op", "router"})
+
+	// routerDone answers "when is this router finished with the request". A
+	// JSON response cannot be written until every router is done or the
+	// records limit is hit, so the slowest of these is the response time.
+	routerDone = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:      "done_seconds",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Time from the start of a parallel routing request to a router finishing, by why it finished",
+		Buckets:   routerTimingBuckets,
+	}, []string{"op", "router", "reason"})
+
+	// routerRecords counts what each router contributed.
+	routerRecords = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name:      "records",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Number of records forwarded per router",
+	}, []string{"op", "router"})
+
+	// routerExclusiveRecords counts what would have been lost had the router
+	// not run: keys no other router produced in the same request.
+	routerExclusiveRecords = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name:      "exclusive_records",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Number of records whose peer ID no other router produced in the same request",
+	}, []string{"op", "router"})
+
+	// routerTail is how long the last router kept the request open on its own,
+	// which is exactly the time a cut would save.
+	routerTail = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:      "tail_seconds",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Gap between the second-to-last and the last router finishing, observed once per multi-router request under the last finisher",
+		Buckets:   routerTimingBuckets,
+	}, []string{"router"})
+
+	// routerLastFinisher is the denominator for routerTail: how often each
+	// router was the one holding the request open.
+	routerLastFinisher = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name:      "last_finisher",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Number of multi-router requests in which this router was the last to finish",
+	}, []string{"router"})
+)
+
+// routerName gives one member of a parallelRouter a stable, low-cardinality
+// metric label. combineRouters wraps the DHT in sanitizeRouter and (when the
+// address book is on) cachedRouter, so the wrappers are peeled off until the
+// router that does the work is reached. The label set is therefore at most one
+// "dht" plus one per configured delegated endpoint.
+func routerName(r router) string {
+	// Bounded so a wrapper that somehow wrapped itself cannot spin here.
+	for range 8 {
+		switch v := r.(type) {
+		case sanitizeRouter:
+			r = v.router
+		case cachedRouter:
+			r = v.router
+		case dnsAddrRouter:
+			r = v.router
+		case libp2pRouter:
+			return "dht"
+		case clientRouter:
+			return "delegated:" + v.name
+		default:
+			return "other"
+		}
+	}
+	return "other"
+}
+
+// recordKey identifies a record for the exclusive-records count. peer.ID is a
+// string of raw bytes underneath, so this is a free conversion rather than a
+// base58 encode. Records with no peer ID, and schemas we do not know, have no
+// key and are left out of the count.
+func recordKey(v any) (string, bool) {
+	switch r := v.(type) {
+	case *types.PeerRecord:
+		if r == nil || r.ID == nil {
+			return "", false
+		}
+		return string(*r.ID), true
+	//lint:ignore SA1019 // bitswap records still arrive from older routers
+	case *types.BitswapRecord:
+		if r == nil || r.ID == nil {
+			return "", false
+		}
+		return string(*r.ID), true
+	}
+	return "", false
+}
+
+// routerTrace is one parallel routing request's per-router timing. find builds
+// it, manyIter's goroutines fill it in, and finalize reads it once when the
+// request ends. When the trace log is off it still carries the key map, which
+// is the only per-request cost the instrumentation adds.
+type routerTrace struct {
+	op    string
+	names []string
+	start time.Time
+	log   bool
+
+	mu       sync.Mutex
+	first    []time.Duration // -1 until the router forwards something
+	done     []time.Duration
+	records  []int
+	keys     map[string]int // record key -> the only router that produced it, or -1 once shared
+	lastIdx  int
+	lastDone time.Duration
+	prevDone time.Duration
+	finished int
+
+	once sync.Once
+}
+
+func newRouterTrace(op string, names []string, start time.Time, log bool) *routerTrace {
+	rt := &routerTrace{
+		op:      op,
+		names:   names,
+		start:   start,
+		log:     log,
+		first:   make([]time.Duration, len(names)),
+		done:    make([]time.Duration, len(names)),
+		records: make([]int, len(names)),
+		keys:    make(map[string]int),
+		lastIdx: -1,
+	}
+	for i := range rt.first {
+		rt.first[i] = -1
+	}
+	return rt
+}
+
+// record notes one record forwarded by router i. It is called after the send
+// succeeds, so the time it stamps is when the record actually left the router.
+func (rt *routerTrace) record(i int, v any) {
+	if rt == nil {
+		return
+	}
+	elapsed := time.Since(rt.start)
+	key, hasKey := recordKey(v)
+
+	rt.mu.Lock()
+	rt.records[i]++
+	isFirst := rt.first[i] < 0
+	if isFirst {
+		rt.first[i] = elapsed
+	}
+	if hasKey {
+		// -1 marks a key more than one router produced. Which router got there
+		// first does not matter: the question is whether it was alone.
+		if prev, seen := rt.keys[key]; !seen {
+			rt.keys[key] = i
+		} else if prev != i {
+			rt.keys[key] = -1
+		}
+	}
+	rt.mu.Unlock()
+
+	routerRecords.WithLabelValues(rt.op, rt.names[i]).Inc()
+	if isFirst {
+		routerFirstResult.WithLabelValues(rt.op, rt.names[i]).Observe(elapsed.Seconds())
+	}
+}
+
+// finish notes that router i's goroutine has exited. cancelled is true only
+// when the request ended under it - the records limit was reached, or the
+// client went away - as opposed to its iterator running out.
+//
+// The routers serialise here, so the last caller is the last finisher and
+// prevDone is the one before it, which is what makes the tail a plain
+// subtraction.
+func (rt *routerTrace) finish(i int, cancelled bool) {
+	if rt == nil {
+		return
+	}
+	elapsed := time.Since(rt.start)
+	reason := routerDoneExhausted
+	if cancelled {
+		reason = routerDoneCancelled
+	}
+
+	rt.mu.Lock()
+	rt.done[i] = elapsed
+	rt.prevDone = rt.lastDone
+	rt.lastDone = elapsed
+	rt.lastIdx = i
+	rt.finished++
+	rt.mu.Unlock()
+
+	routerDone.WithLabelValues(rt.op, rt.names[i], reason).Observe(elapsed.Seconds())
+}
+
+// finalize closes the request out: it resolves the exclusive-record question
+// once (a key produced by exactly one router is exclusive to it), observes the
+// tail the last router held the request open for, and emits the trace line. It
+// runs exactly once, from whichever of the closer goroutine and Close reaches
+// it first.
+func (rt *routerTrace) finalize(cancelled bool) {
+	if rt == nil {
+		return
+	}
+	rt.once.Do(func() { rt.emit(cancelled) })
+}
+
+// routerTraceSnapshot is one request's finished timing, taken under the lock so
+// the rest of finalize needs neither the lock nor a second pass over the keys.
+type routerTraceSnapshot struct {
+	first     []time.Duration
+	done      []time.Duration
+	records   []int
+	exclusive []int
+	lastIdx   int
+	lastDone  time.Duration
+	prevDone  time.Duration
+	finished  int
+}
+
+func (rt *routerTrace) snapshot() routerTraceSnapshot {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	exclusive := make([]int, len(rt.names))
+	for _, i := range rt.keys {
+		if i >= 0 {
+			exclusive[i]++
+		}
+	}
+	return routerTraceSnapshot{
+		first:     slices.Clone(rt.first),
+		done:      slices.Clone(rt.done),
+		records:   slices.Clone(rt.records),
+		exclusive: exclusive,
+		lastIdx:   rt.lastIdx,
+		lastDone:  rt.lastDone,
+		prevDone:  rt.prevDone,
+		finished:  rt.finished,
+	}
+}
+
+func (rt *routerTrace) emit(cancelled bool) {
+	snap := rt.snapshot()
+
+	for i, n := range rt.names {
+		if snap.exclusive[i] > 0 {
+			routerExclusiveRecords.WithLabelValues(rt.op, n).Add(float64(snap.exclusive[i]))
+		}
+	}
+
+	// The tail needs something to subtract, so it wants two routers that both
+	// finished.
+	if len(rt.names) > 1 && snap.finished > 1 && snap.lastIdx >= 0 {
+		routerTail.WithLabelValues(rt.names[snap.lastIdx]).Observe((snap.lastDone - snap.prevDone).Seconds())
+		routerLastFinisher.WithLabelValues(rt.names[snap.lastIdx]).Inc()
+	}
+
+	if !rt.log {
+		return
+	}
+	logger.Infow("parallel routing request", rt.traceFields(snap, cancelled)...)
+}
+
+// traceFields is the one trace line's payload: the request as a whole, then
+// four fields per router. A router that produced nothing has zero records and
+// a first_ms of -1, which is the "never happened" marker - zero would read as
+// "instantly".
+func (rt *routerTrace) traceFields(snap routerTraceSnapshot, cancelled bool) []any {
+	reason := routerDoneExhausted
+	if cancelled {
+		reason = routerDoneCancelled
+	}
+
+	fields := make([]any, 0, 6+8*len(rt.names))
+	fields = append(fields, "op", rt.op, "total_ms", durationMillis(snap.lastDone), "reason", reason)
+	for i, n := range rt.names {
+		fields = append(fields,
+			n+"_first_ms", durationMillis(snap.first[i]),
+			n+"_done_ms", durationMillis(snap.done[i]),
+			n+"_records", snap.records[i],
+			n+"_exclusive", snap.exclusive[i],
+		)
+	}
+	return fields
+}
+
+// durationMillis renders a duration as whole milliseconds. A negative duration
+// is the "never happened" marker and stays -1.
+func durationMillis(d time.Duration) int64 {
+	if d < 0 {
+		return -1
+	}
+	return d.Milliseconds()
+}
+
 var _ server.ContentRouter = parallelRouter{}
 
 type parallelRouter struct {
 	routers []router
+	// trace turns on the per-request trace line (--router-trace). The metrics
+	// above are always on; only the log line is gated.
+	trace bool
 }
 
 func (r parallelRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
-	return find(ctx, r.routers, func(ri router) (iter.ResultIter[types.Record], error) {
+	return find(ctx, r.routers, routerOpProviders, r.trace, func(ri router) (iter.ResultIter[types.Record], error) {
 		return ri.FindProviders(ctx, key, limit)
 	})
 }
 
 func (r parallelRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
-	return find(ctx, r.routers, func(ri router) (iter.ResultIter[*types.PeerRecord], error) {
+	return find(ctx, r.routers, routerOpPeers, r.trace, func(ri router) (iter.ResultIter[*types.PeerRecord], error) {
 		return ri.FindPeers(ctx, pid, limit)
 	})
 }
 
-func find[T any](ctx context.Context, routers []router, call func(router) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
+func find[T any](ctx context.Context, routers []router, op string, trace bool, call func(router) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
+	// The clock starts here, not after the iterators are built: creating a
+	// delegated iterator is an HTTP round trip, and that is part of what the
+	// router cost the request.
+	start := time.Now()
+
 	switch len(routers) {
 	case 0:
 		return iter.ToResultIter(iter.FromSlice([]T{})), nil
@@ -127,6 +468,7 @@ func find[T any](ctx context.Context, routers []router, call func(router) (iter.
 	}
 
 	its := make([]iter.ResultIter[T], 0, len(routers))
+	names := make([]string, 0, len(routers))
 	var err error
 	for _, ri := range routers {
 		it, itErr := call(ri)
@@ -136,6 +478,7 @@ func find[T any](ctx context.Context, routers []router, call func(router) (iter.
 			err = errors.Join(err, itErr)
 		} else {
 			its = append(its, it)
+			names = append(names, routerName(ri))
 		}
 	}
 
@@ -148,11 +491,11 @@ func find[T any](ctx context.Context, routers []router, call func(router) (iter.
 	}
 
 	// Otherwise return manyIter with remaining iterators.
-	return newManyIter(ctx, its), nil
+	return newManyIter(ctx, its, newRouterTrace(op, names, start, trace)), nil
 }
 
 func (r parallelRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
-	return find(ctx, r.routers, func(ri router) (iter.ResultIter[*types.PeerRecord], error) {
+	return find(ctx, r.routers, routerOpClosest, r.trace, func(ri router) (iter.ResultIter[*types.PeerRecord], error) {
 		return ri.GetClosestPeers(ctx, key)
 	})
 }
@@ -165,9 +508,10 @@ type manyIter[T any] struct {
 	ch     chan iter.Result[T]
 	val    iter.Result[T]
 	done   bool
+	trace  *routerTrace // nil disables the timing entirely
 }
 
-func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T]) *manyIter[T] {
+func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], trace *routerTrace) *manyIter[T] {
 	ctx, cancel := context.WithCancel(ctx)
 
 	mi := &manyIter[T]{
@@ -175,24 +519,40 @@ func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T]) *manyIter
 		cancel: cancel,
 		its:    its,
 		ch:     make(chan iter.Result[T]),
+		trace:  trace,
 	}
 
-	for _, it := range its {
+	for i, it := range its {
 		mi.wg.Add(1)
-		go func(it iter.ResultIter[T]) {
+		go func(i int, it iter.ResultIter[T]) {
 			defer mi.wg.Done()
 			for it.Next() {
+				val := it.Val()
 				select {
-				case mi.ch <- it.Val():
+				case mi.ch <- val:
+					if val.Err == nil {
+						trace.record(i, val.Val)
+					}
 				case <-ctx.Done():
+					trace.finish(i, true)
 					return
 				}
 			}
-		}(it)
+			// The iterator ran out, but that is not on its own "exhausted":
+			// Close drains the channel to unblock pending sends, so a router
+			// that was still producing when the request was cancelled will
+			// often push its last records into the drain and then run out. The
+			// question the label answers is whether the request had already
+			// ended, so that is what it is read from.
+			trace.finish(i, ctx.Err() != nil)
+		}(i, it)
 	}
 
 	go func() {
 		mi.wg.Wait()
+		// Before the close, so a consumer that returns the moment the channel
+		// closes cannot race the trace line for the request it just finished.
+		trace.finalize(ctx.Err() != nil)
 		close(mi.ch)
 	}()
 
@@ -235,6 +595,10 @@ func (mi *manyIter[T]) Close() error {
 	for range mi.ch {
 		// Discard remaining values
 	}
+
+	// The closer goroutine finalizes before it closes the channel, so by here
+	// it has already run; this is only for the case where it somehow has not.
+	mi.trace.finalize(true)
 
 	// Now close child iterators
 	var err error

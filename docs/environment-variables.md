@@ -38,6 +38,7 @@ The environment variables below override `someguy`'s built-in defaults.
   - [`SOMEGUY_SAMPLING_FRACTION`](#someguy_sampling_fraction)
 - [Profiling](#profiling)
   - [`SOMEGUY_PPROF`](#someguy_pprof)
+  - [`SOMEGUY_ROUTER_TRACE`](#someguy_router_trace)
 
 ## Configuration
 
@@ -310,5 +311,20 @@ The endpoints serve the process's command line, its goroutine stacks and its hea
 ```console
 $ curl -o cpu.pprof 'http://127.0.0.1:8190/debug/pprof/profile?seconds=30'
 ```
+
+Default: `false`
+
+### `SOMEGUY_ROUTER_TRACE`
+
+Logs one line per parallel routing request, at `info` on the `someguy` logger, with each router's first-result time, finish time, record count and exclusive-record count. It is the per-request form of the [parallel router metrics](metrics.md#parallel-router): the histograms say how the fleet behaves, this says what happened to one request, which is what you need to ask "what would cutting this router off after X ms have cost".
+
+This is one log line for every `/routing/v1/providers` and `/routing/v1/peers` request the server answers - at a few hundred requests per second that is a few hundred lines per second, indefinitely. It is meant for a measurement run, not for leaving on.
+
+```console
+$ SOMEGUY_ROUTER_TRACE=true someguy start
+{"level":"info","msg":"parallel routing request","op":"providers","total_ms":612,"reason":"exhausted","delegated:cid.contact_first_ms":-1,"delegated:cid.contact_done_ms":38,"delegated:cid.contact_records":0,"delegated:cid.contact_exclusive":0,"dht_first_ms":244,"dht_done_ms":612,"dht_records":4,"dht_exclusive":4}
+```
+
+A `first_ms` of `-1` means that router never produced a record; `0` would read as "instantly". The metrics above are always on - only this line is gated.
 
 Default: `false`

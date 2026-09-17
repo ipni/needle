@@ -17,6 +17,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -651,7 +653,7 @@ func TestManyIter(t *testing.T) {
 		ctx := t.Context()
 
 		its := newMockIters[int](ctx, 2)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its))
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
 
 		go func() {
 			its[0].ch <- iter.Result[int]{Val: 0}
@@ -686,7 +688,7 @@ func TestManyIter(t *testing.T) {
 		ctx := t.Context()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its))
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
 
 		go func() {
 			close(its[0].ch)
@@ -717,7 +719,7 @@ func TestManyIter(t *testing.T) {
 		defer cancel()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its))
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
 
 		go func() {
 			its[3].ch <- iter.Result[int]{Val: 3}
@@ -743,7 +745,7 @@ func TestManyIter(t *testing.T) {
 		defer cancel()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its))
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
 
 		go func() {
 			its[1].ch <- iter.Result[int]{Val: 1}
@@ -834,4 +836,269 @@ func TestFilterPrivateMultiaddrPlacesRelayAddrsLast(t *testing.T) {
 	require.False(t, isRelayAddr(out[1].Multiaddr))
 	require.True(t, isRelayAddr(out[2].Multiaddr))
 	require.True(t, isRelayAddr(out[3].Multiaddr))
+}
+
+// ---------------------------------------------------------------------------
+// Per-router timing.
+//
+// The router metrics are package-level collectors that every test in the
+// package shares, so these tests assert on before/after deltas rather than on
+// absolute values.
+
+// timedIter yields a fixed list of records, sleeping before the one at delayAt
+// and again before it reports that it has run out. Unlike mockIter it exhausts
+// on its own schedule, which is what the timing assertions need: the point is
+// to make one router finish later than the other.
+type timedIter struct {
+	vals     []iter.Result[types.Record]
+	delay    time.Duration
+	delayAt  int
+	delayEnd time.Duration
+	i        int
+}
+
+var _ iter.ResultIter[types.Record] = (*timedIter)(nil)
+
+func (t *timedIter) Next() bool {
+	if t.i >= len(t.vals) {
+		if t.delayEnd > 0 {
+			time.Sleep(t.delayEnd)
+			t.delayEnd = 0
+		}
+		return false
+	}
+	if t.i == t.delayAt && t.delay > 0 {
+		time.Sleep(t.delay)
+	}
+	t.i++
+	return true
+}
+
+func (t *timedIter) Val() iter.Result[types.Record] { return t.vals[t.i-1] }
+
+func (t *timedIter) Close() error { return nil }
+
+// peerRec is a minimal peer record. peer.ID is a string underneath and
+// recordKey never decodes it, so an arbitrary one is enough to stand for
+// "the same provider" across two routers.
+func peerRec(id string) iter.Result[types.Record] {
+	pid := peer.ID(id)
+	return iter.Result[types.Record]{Val: &types.PeerRecord{Schema: types.SchemaPeer, ID: &pid}}
+}
+
+func counterVal(t *testing.T, c *prometheus.CounterVec, lv ...string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(c.WithLabelValues(lv...))
+}
+
+// histVal reads one histogram series' observation count and sum. testutil has
+// no helper for this, so it goes through the gatherer the collectors are
+// registered with.
+func histVal(t *testing.T, metric string, labels map[string]string) (uint64, float64) {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != metric {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			got := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				got[lp.GetName()] = lp.GetValue()
+			}
+			match := true
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+			}
+		}
+	}
+	return 0, 0
+}
+
+func fieldsMap(t *testing.T, fields []any) map[string]any {
+	t.Helper()
+	require.Zero(t, len(fields)%2, "trace fields must be key/value pairs")
+	m := make(map[string]any, len(fields)/2)
+	for i := 0; i < len(fields); i += 2 {
+		k, ok := fields[i].(string)
+		require.True(t, ok, "trace field key %d is not a string", i)
+		m[k] = fields[i+1]
+	}
+	return m
+}
+
+func TestRouterTimingExhausted(t *testing.T) {
+	const (
+		op    = routerOpProviders
+		fast  = "delegated:cid.contact"
+		slow  = "dht"
+		delay = 150 * time.Millisecond
+	)
+
+	recBefore := counterVal(t, routerRecords, op, fast)
+	recSlowBefore := counterVal(t, routerRecords, op, slow)
+	excBefore := counterVal(t, routerExclusiveRecords, op, fast)
+	excSlowBefore := counterVal(t, routerExclusiveRecords, op, slow)
+	firstBefore, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": fast})
+	firstSlowBefore, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": slow})
+	doneBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneExhausted})
+	tailBefore, tailSumBefore := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": slow})
+	tailFastBefore, _ := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": fast})
+	lastBefore := counterVal(t, routerLastFinisher, slow)
+
+	// "C" is produced by both routers, so it is exclusive to neither.
+	fastIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("A"), peerRec("B"), peerRec("C")}}
+	slowIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("C"), peerRec("D")}, delay: delay}
+
+	trace := newRouterTrace(op, []string{fast, slow}, time.Now(), true)
+	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, trace)
+
+	got, err := iter.ReadAllResults(mi)
+	require.NoError(t, err)
+	require.Len(t, got, 5)
+	require.NoError(t, mi.Close())
+
+	require.Equal(t, 3.0, counterVal(t, routerRecords, op, fast)-recBefore)
+	require.Equal(t, 2.0, counterVal(t, routerRecords, op, slow)-recSlowBefore)
+
+	// A and B for the fast router, D for the slow one; C is shared.
+	require.Equal(t, 2.0, counterVal(t, routerExclusiveRecords, op, fast)-excBefore)
+	require.Equal(t, 1.0, counterVal(t, routerExclusiveRecords, op, slow)-excSlowBefore)
+
+	firstAfter, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": fast})
+	firstSlowAfter, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": slow})
+	require.Equal(t, uint64(1), firstAfter-firstBefore, "first result observed once per router that produced")
+	require.Equal(t, uint64(1), firstSlowAfter-firstSlowBefore)
+
+	doneAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneExhausted})
+	require.Equal(t, uint64(1), doneAfter-doneBefore)
+	require.Equal(t, uint64(1), doneSlowAfter-doneSlowBefore)
+
+	// The tail belongs to the slow router alone, and is about the delay: the
+	// fast one was finished before the slow one produced anything.
+	tailAfter, tailSumAfter := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": slow})
+	tailFastAfter, _ := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": fast})
+	require.Equal(t, uint64(1), tailAfter-tailBefore)
+	require.Equal(t, uint64(0), tailFastAfter-tailFastBefore)
+	tail := tailSumAfter - tailSumBefore
+	require.Greater(t, tail, delay.Seconds()/2)
+	require.Less(t, tail, delay.Seconds()*4)
+	require.Equal(t, 1.0, counterVal(t, routerLastFinisher, slow)-lastBefore)
+
+	// The trace line: one entry for the request, four per router.
+	f := fieldsMap(t, trace.traceFields(trace.snapshot(), false))
+	require.Equal(t, op, f["op"])
+	require.Equal(t, routerDoneExhausted, f["reason"])
+	require.Equal(t, 3, f[fast+"_records"])
+	require.Equal(t, 2, f[slow+"_records"])
+	require.Equal(t, 2, f[fast+"_exclusive"])
+	require.Equal(t, 1, f[slow+"_exclusive"])
+	require.GreaterOrEqual(t, f[slow+"_first_ms"], int64(delay.Milliseconds()/2))
+	require.GreaterOrEqual(t, f["total_ms"], f[slow+"_done_ms"])
+}
+
+func TestRouterTimingCancelled(t *testing.T) {
+	const (
+		op   = routerOpPeers
+		fast = "delegated:cid.contact"
+		slow = "dht"
+	)
+
+	doneBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneCancelled})
+	lastBefore := counterVal(t, routerLastFinisher, slow)
+	excBefore := counterVal(t, routerExclusiveRecords, op, slow)
+
+	fastIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("A"), peerRec("B"), peerRec("C")}}
+	// The slow router hands over one record and then takes 200ms to admit it
+	// has no more, so it is still running when Close cancels the request -
+	// which is what boxo's server does once the records limit is reached. It
+	// deliberately has no second record to offer: Close drains the channel to
+	// unblock pending sends, so a record still in hand at the cancel would
+	// sometimes go through and sometimes not.
+	slowIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("X")}, delayEnd: 200 * time.Millisecond}
+
+	trace := newRouterTrace(op, []string{fast, slow}, time.Now(), true)
+	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, trace)
+
+	// Exactly the four records available without waiting out the delay.
+	for range 4 {
+		require.True(t, mi.Next())
+	}
+	// The fast router's goroutine has sent its last record but may not have
+	// reached its own finish yet; let it get there, so that the cancel below
+	// is unambiguously after it.
+	require.Eventually(t, func() bool { return trace.snapshot().finished == 1 }, time.Second, time.Millisecond)
+	require.NoError(t, mi.Close())
+
+	doneAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneCancelled})
+	require.Equal(t, uint64(1), doneAfter-doneBefore, "the router that ran out is exhausted, not cancelled")
+	require.Equal(t, uint64(1), doneSlowAfter-doneSlowBefore, "the router still running when Close cancelled is cancelled")
+
+	// finalize ran exactly once, from the closer goroutine, and a later call
+	// from Close cannot double-count.
+	require.Equal(t, 1.0, counterVal(t, routerLastFinisher, slow)-lastBefore)
+	require.Equal(t, 1.0, counterVal(t, routerExclusiveRecords, op, slow)-excBefore, "X, forwarded before the cancel")
+	trace.finalize(true)
+	require.Equal(t, 1.0, counterVal(t, routerLastFinisher, slow)-lastBefore)
+	require.Equal(t, 1.0, counterVal(t, routerExclusiveRecords, op, slow)-excBefore)
+
+	f := fieldsMap(t, trace.traceFields(trace.snapshot(), true))
+	require.Equal(t, routerDoneCancelled, f["reason"])
+	require.Equal(t, 1, f[slow+"_records"])
+	require.Equal(t, 3, f[fast+"_records"])
+}
+
+func TestRouterTraceFieldsForSilentRouter(t *testing.T) {
+	const (
+		op    = "silent-test"
+		quiet = "dht"
+		other = "delegated:cid.contact"
+	)
+
+	trace := newRouterTrace(op, []string{quiet, other}, time.Now(), true)
+	trace.record(1, peerRec("A").Val)
+	trace.finish(1, false)
+	trace.finish(0, false)
+
+	f := fieldsMap(t, trace.traceFields(trace.snapshot(), false))
+	require.Equal(t, int64(-1), f[quiet+"_first_ms"], "a router that produced nothing has no first result")
+	require.Equal(t, 0, f[quiet+"_records"])
+	require.Equal(t, 0, f[quiet+"_exclusive"])
+	require.NotEqual(t, int64(-1), f[other+"_first_ms"])
+	require.Equal(t, 1, f[other+"_records"])
+	require.Equal(t, 1, f[other+"_exclusive"])
+}
+
+func TestRouterName(t *testing.T) {
+	// The shapes combineRouters actually builds, plus the two that can only
+	// turn up by mistake.
+	dht := libp2pRouter{}
+	require.Equal(t, "dht", routerName(sanitizeRouter{dht}))
+	require.Equal(t, "dht", routerName(sanitizeRouter{NewCachedRouter(dht, nil)}))
+	require.Equal(t, "dht", routerName(dnsAddrRouter{router: sanitizeRouter{NewCachedRouter(dht, nil)}}))
+	require.Equal(t, "delegated:cid.contact", routerName(clientRouter{name: "cid.contact"}))
+
+	// additionalRouters (the HTTP block providers) and anything unrecognised.
+	require.Equal(t, "other", routerName(composableRouter{}))
+	require.Equal(t, "other", routerName(nil))
+}
+
+func TestEndpointLabel(t *testing.T) {
+	require.Equal(t, "cid.contact", endpointLabel("https://cid.contact"))
+	require.Equal(t, "cid.contact", endpointLabel("https://cid.contact/routing/v1"))
+	require.Equal(t, "delegated-ipfs.dev", endpointLabel("https://delegated-ipfs.dev/routing/v1"))
+	require.Equal(t, "example.com:8080", endpointLabel("http://example.com:8080/x"))
+	// No host to take: keep the whole thing rather than label it "".
+	require.Equal(t, "not a url", endpointLabel("not a url"))
 }

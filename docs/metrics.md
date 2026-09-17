@@ -33,6 +33,35 @@ When Someguy aggregates other `/routing/v1` endpoints, `boxo/routing/http/client
 
 The five snapshot gauges read `0` while the address book snapshot is disabled (`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL` at `0`). The errors counter has no `_total` suffix (matching `probed_peers`), and each of its `op` series only appears after the first error of that kind, so alerts must handle the absent series.
 
+### Parallel router
+
+When more than one router serves an operation, Someguy fans the request out to
+all of them and merges their records. Only the merge point knows what each
+router contributed and when, so these are measured there. `op` is `providers`,
+`peers` or `closest`; `router` is `dht` or `delegated:<host>`. A request served
+by a single router does not fan out, so it is not measured here.
+
+- `someguy_router_first_result_seconds_[bucket|sum|count]{op,router}`: histogram of the time from the start of the request to a router's first record. Only observed for routers that produced something, so its `count` is "requests this router answered", not "requests it saw".
+- `someguy_router_done_seconds_[bucket|sum|count]{op,router,reason}`: histogram of the time from the start of the request to a router finishing. `reason` is `exhausted` when its iterator ran out, `cancelled` when the request ended under it - the records limit was reached, or the client went away. A JSON response cannot be written until every router is done or the records limit is hit, so the slowest of these is the response time.
+- `someguy_router_records{op,router}`: counter of records forwarded per router.
+- `someguy_router_exclusive_records{op,router}`: counter of records whose peer ID no other router produced in the same request. Records with no peer ID, and schemas Someguy does not know, are not counted either way.
+- `someguy_router_tail_seconds_[bucket|sum|count]{router}`: histogram of the gap between the second-to-last router finishing and the last one finishing, observed once per multi-router request, under the router that was last.
+- `someguy_router_last_finisher{router}`: counter of requests in which this router was the last to finish. This is `tail_seconds`'s denominator.
+
+Like the snapshot error counters, each series only appears after its first
+non-zero observation, so a router that has never been last, or has never found
+a record no one else had, has no series at all rather than a series reading
+`0`. Alerts and dashboards have to handle the absent series.
+
+`tail_seconds` and `exclusive_records` are the two halves of "is this router
+worth waiting for". `tail_seconds{router="dht"}` against
+`last_finisher{router="dht"}` is how much response time the DHT costs when it
+is the one holding the request open - the time a cut-off would save.
+`exclusive_records{router="dht"}` against `records{router="dht"}` is what that
+cut-off would throw away: records the DHT alone found. A router with a long
+tail and no exclusive records is pure latency; a long tail and many exclusive
+records is a real trade.
+
 ### Background peer lookups
 
 When a provider record arrives without addresses and the cache has none, Someguy

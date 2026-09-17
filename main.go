@@ -198,6 +198,12 @@ func main() {
 						EnvVars: []string{"SOMEGUY_PPROF"},
 						Usage:   "expose Go pprof profiles at /debug/pprof/ on the API address and enable mutex and block profile sampling",
 					},
+					&cli.BoolFlag{
+						Name:    "router-trace",
+						Value:   false,
+						EnvVars: []string{"SOMEGUY_ROUTER_TRACE"},
+						Usage:   "log one line per parallel routing request with per-router first-result, done and record counts; high volume, for experiments only",
+					},
 					&cli.StringFlag{
 						Name:    "datadir",
 						Value:   "",
@@ -270,6 +276,7 @@ func main() {
 						tracingAuth:      ctx.String("tracing-auth"),
 						samplingFraction: ctx.Float64("sampling-fraction"),
 						pprof:            ctx.Bool("pprof"),
+						routerTrace:      ctx.Bool("router-trace"),
 
 						autoConf: autoConfConfig{
 							enabled:         ctx.Bool("autoconf"),
@@ -287,6 +294,9 @@ func main() {
 					}
 					if cfg.pprof {
 						fmt.Printf("SOMEGUY_PPROF = true\n")
+					}
+					if cfg.routerTrace {
+						fmt.Printf("SOMEGUY_ROUTER_TRACE = true\n")
 					}
 					printIfListConfigured("SOMEGUY_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
 					printIfListConfigured("SOMEGUY_PEER_ENDPOINTS = ", cfg.peerEndpoints)
