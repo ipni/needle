@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/ipfs/boxo/ipns"
 	"github.com/ipfs/go-cid"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p-kad-dht/crawler"
 	"github.com/libp2p/go-libp2p-kad-dht/fullrt"
 	record "github.com/libp2p/go-libp2p-record"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -18,6 +20,12 @@ import (
 type bundledDHT struct {
 	standard *dht.IpfsDHT
 	fullRT   *fullrt.FullRT
+
+	// crawlSnapshot is nil unless the crawl snapshot is enabled. cancel and wg
+	// belong to the goroutine that triggers the refresh after a replay.
+	crawlSnapshot *snapshotCrawler
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
 const (
@@ -33,13 +41,32 @@ const (
 	DefaultFindPeerDialTimeout = 5 * time.Second
 )
 
-func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrace, findPeerDialTimeout time.Duration) (routing.Routing, error) {
+// newDefaultCrawler builds the crawler fullrt would have built for itself.
+// Supplying fullrt.WithCrawler replaces that default, so the snapshot wrapper
+// has to rebuild it with the same parallelism: see crawler.NewDefaultCrawler(h,
+// crawler.WithParallelism(200)) in go-libp2p-kad-dht fullrt/dht.go (v0.42.1
+// lines 184-189).
+//
+// It is a variable only so tests can inject a crawler that does not dial;
+// nothing in production reassigns it.
+var newDefaultCrawler = func(h host.Host) (crawler.Crawler, error) {
+	return crawler.NewDefaultCrawler(h, crawler.WithParallelism(200))
+}
+
+// newBundledDHT builds the accelerated client: a standard DHT client that
+// answers until the accelerated one has crawled, and the accelerated one
+// itself. A positive crawlSnapshotMaxAge turns on the crawl snapshot described
+// in dht_crawl_snapshot.go: the routing table is written to crawlSnapshotPath
+// after every completed crawl and replayed at startup when the file is younger
+// than that. At 0 the wrapper is not built at all and fullrt runs its own
+// default crawler, exactly as it did before the snapshot existed.
+func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrace, findPeerDialTimeout time.Duration, crawlSnapshotPath string, crawlSnapshotMaxAge time.Duration) (*bundledDHT, error) {
 	standardDHT, err := dht.New(h, dht.Mode(dht.ModeClient), dht.BootstrapPeers(bootstrapAddrInfos...))
 	if err != nil {
 		return nil, err
 	}
 
-	fullRT, err := fullrt.NewFullRT(h, "/ipfs",
+	fullRTOpts := []fullrt.Option{
 		fullrt.DHTOption(
 			dht.BucketSize(20),
 			dht.Validator(record.NamespacedValidator{
@@ -50,15 +77,65 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrac
 			dht.Mode(dht.ModeClient),
 		),
 		fullrt.WithFindPeerGrace(findPeerGrace),
-		fullrt.WithFindPeerDialTimeout(findPeerDialTimeout))
+		fullrt.WithFindPeerDialTimeout(findPeerDialTimeout),
+	}
+
+	var crawlSnapshot *snapshotCrawler
+	if crawlSnapshotMaxAge > 0 {
+		inner, err := newDefaultCrawler(h)
+		if err != nil {
+			standardDHT.Close()
+			return nil, err
+		}
+		crawlSnapshot, err = newSnapshotCrawler(inner, h.Peerstore(), crawlSnapshotPath, crawlSnapshotMaxAge)
+		if err != nil {
+			standardDHT.Close()
+			return nil, err
+		}
+		fullRTOpts = append(fullRTOpts, fullrt.WithCrawler(crawlSnapshot))
+	}
+
+	fullRT, err := fullrt.NewFullRT(h, "/ipfs", fullRTOpts...)
 	if err != nil {
+		standardDHT.Close()
 		return nil, err
 	}
 
-	return &bundledDHT{
-		standard: standardDHT,
-		fullRT:   fullRT,
-	}, nil
+	b := &bundledDHT{
+		standard:      standardDHT,
+		fullRT:        fullRT,
+		crawlSnapshot: crawlSnapshot,
+	}
+
+	if crawlSnapshot != nil {
+		// A replayed table is as stale as the last completed crawl plus the
+		// downtime, so a real crawl has to follow it immediately. The trigger
+		// is sent on an unbuffered channel that fullrt reads only between
+		// crawls, so it blocks until the replayed table is installed and then
+		// starts a crawl seeded with the replayed peers: Ready first, then
+		// refresh.
+		ctx, cancel := context.WithCancel(context.Background())
+		b.cancel = cancel
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+			select {
+			case <-crawlSnapshot.FirstRunDone():
+			case <-ctx.Done():
+				return
+			}
+			if !crawlSnapshot.Replayed() {
+				return // a real crawl just ran; there is nothing to refresh
+			}
+			if err := fullRT.TriggerRefresh(ctx); err != nil {
+				logger.Warnf("triggering a dht crawl after replaying the crawl snapshot: %v", err)
+				return
+			}
+			logger.Infof("triggered a dht crawl to refresh the replayed routing table")
+		}()
+	}
+
+	return b, nil
 }
 
 // Close stops both DHT clients. Since go-libp2p-kad-dht v0.42.0 the
@@ -66,6 +143,12 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrac
 // them no longer shuts them down and Close is the only way to stop their
 // long-lived goroutines.
 func (b *bundledDHT) Close() error {
+	if b.cancel != nil {
+		// Stop the post-replay refresh first: it can be blocked sending a
+		// trigger fullrt will never read once it is closed.
+		b.cancel()
+		b.wg.Wait()
+	}
 	return errors.Join(b.fullRT.Close(), b.standard.Close())
 }
 

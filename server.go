@@ -121,6 +121,8 @@ type config struct {
 	cachedAddrBookSnapshotPath     string
 	cachedAddrBookSnapshotInterval time.Duration
 	cachedAddrBookNegativeTTL      time.Duration
+	dhtCrawlSnapshotPath           string
+	dhtCrawlSnapshotMaxAge         time.Duration
 	routingTimeout                 time.Duration
 	dnsAddrResolution              DNSAddrResolution
 	recordsLimit                   int
@@ -229,7 +231,7 @@ func start(ctx context.Context, cfg *config) error {
 	var dhtRouting routing.Routing
 	switch cfg.dhtType {
 	case "accelerated":
-		wrappedDHT, err := newBundledDHT(h, bootstrapAddrInfos, cfg.findPeerGrace, cfg.findPeerDialTimeout)
+		wrappedDHT, err := newBundledDHT(h, bootstrapAddrInfos, cfg.findPeerGrace, cfg.findPeerDialTimeout, cfg.dhtCrawlSnapshotPath, cfg.dhtCrawlSnapshotMaxAge)
 		if err != nil {
 			return err
 		}

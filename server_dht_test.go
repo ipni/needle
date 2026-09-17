@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,10 +17,14 @@ import (
 	"github.com/ipfs/boxo/routing/http/types"
 	"github.com/ipfs/boxo/routing/http/types/iter"
 	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p-kad-dht/crawler"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -405,4 +411,127 @@ func (m *mockDHTRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Reco
 
 func (m *mockDHTRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.Record) error {
 	return routing.ErrNotSupported
+}
+
+// fakeInnerCrawler stands in for crawler.DefaultCrawler inside newBundledDHT,
+// so a test can exercise the crawl snapshot without dialling anything.
+type fakeInnerCrawler struct {
+	mu       sync.Mutex
+	runs     int
+	starting [][]*peer.AddrInfo
+	// report is called with the crawl's handleSuccess, so a test can decide
+	// what the crawl "finds".
+	report func(handleSuccess crawler.HandleQueryResult)
+}
+
+func (f *fakeInnerCrawler) Run(_ context.Context, startingPeers []*peer.AddrInfo, handleSuccess crawler.HandleQueryResult, _ crawler.HandleQueryFail) {
+	f.mu.Lock()
+	f.runs++
+	f.starting = append(f.starting, startingPeers)
+	report := f.report
+	f.mu.Unlock()
+
+	if report != nil {
+		report(handleSuccess)
+	}
+}
+
+func (f *fakeInnerCrawler) runCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runs
+}
+
+func (f *fakeInnerCrawler) lastStarting() []*peer.AddrInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.starting) == 0 {
+		return nil
+	}
+	return f.starting[len(f.starting)-1]
+}
+
+// useFakeInnerCrawler swaps the crawler newBundledDHT builds for a fake, for
+// the duration of the test.
+func useFakeInnerCrawler(t *testing.T, fake *fakeInnerCrawler) {
+	t.Helper()
+	prev := newDefaultCrawler
+	newDefaultCrawler = func(host.Host) (crawler.Crawler, error) { return fake, nil }
+	t.Cleanup(func() { newDefaultCrawler = prev })
+}
+
+// TestCrawlSnapshotReplayIsFilteredOutByFullRT records why replaying a
+// snapshot does not, today, make the accelerated client ready.
+//
+// The replay does everything it is supposed to: the addresses land in the host
+// peerstore and every saved peer is reported through handleSuccess. But fullrt
+// runs each reported peer through kaddht.PublicRoutingTableFilter before it
+// keeps it (fullrt/dht.go:370-373 in go-libp2p-kad-dht v0.42.1, unchanged in
+// the ipni fork), and that filter starts with
+//
+//	conns := d.Host().Network().ConnsToPeer(p)
+//	if len(conns) == 0 { return false }
+//
+// (dht_filters.go:87-105). A real crawl passes it because the crawler has just
+// dialled the peer and the connection is still open; a replay never dials, so
+// every replayed peer is dropped and the routing table stays empty.
+//
+// Nothing on fullrt's public option surface overrides that filter, so the
+// wrapper cannot fix this from outside kad-dht. If a future kad-dht lets the
+// route-table filter be supplied, this test fails and should be turned back
+// into the Ready() assertion it was meant to be.
+func TestCrawlSnapshotReplayIsFilteredOutByFullRT(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dht-crawl.ndjson")
+	saved := genCrawlPeers(t, 1500)
+	writeCrawlSnapshot(t, path, crawlSnapshotFormatVersion, time.Now().Add(-time.Minute), saved)
+
+	fake := &fakeInnerCrawler{}
+	useFakeInnerCrawler(t, fake)
+
+	h, err := libp2p.New(libp2p.NoListenAddrs)
+	require.NoError(t, err)
+	t.Cleanup(func() { h.Close() })
+
+	b, err := newBundledDHT(h, nil, DefaultFindPeerGrace, DefaultFindPeerDialTimeout, path, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+	require.NotNil(t, b.crawlSnapshot)
+
+	// The replay itself ran, and left the addresses where the crawl that
+	// follows will look for them.
+	<-b.crawlSnapshot.FirstRunDone()
+	require.True(t, b.crawlSnapshot.Replayed())
+	require.Equal(t, float64(len(saved)), testutil.ToFloat64(crawlSnapshotRestoredPeers))
+	require.Equal(t, saved[0].addrs[0].String(), h.Peerstore().Addrs(saved[0].id)[0].String())
+
+	// The refresh the replay triggers does fire, and it is a real crawl.
+	require.Eventually(t, func() bool { return fake.runCount() == 1 }, 10*time.Second, 50*time.Millisecond,
+		"a replay must be followed by a real crawl")
+
+	// It is seeded with nothing, though: fullrt seeds a refresh from the peers
+	// the previous crawl kept, and it kept none of the replayed ones. In
+	// production that leaves the bootstrap peers, which is a cold crawl.
+	require.Empty(t, fake.lastStarting(), "the refresh is seeded from fullrt's table, which the filter left empty")
+
+	// fullrt kept none of the replayed peers, so it is not ready.
+	require.Zero(t, len(b.fullRT.Stat()), "fullrt drops every peer it has no open connection to")
+	require.False(t, b.fullRT.Ready())
+	require.Zero(t, len(h.Network().ConnsToPeer(saved[0].id)), "the replay dials nothing, which is the point of it")
+}
+
+func TestCrawlSnapshotDisabledUsesDefaultCrawler(t *testing.T) {
+	fake := &fakeInnerCrawler{}
+	useFakeInnerCrawler(t, fake)
+
+	h, err := libp2p.New(libp2p.NoListenAddrs)
+	require.NoError(t, err)
+	t.Cleanup(func() { h.Close() })
+
+	b, err := newBundledDHT(h, nil, DefaultFindPeerGrace, DefaultFindPeerDialTimeout, "", 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+
+	require.Nil(t, b.crawlSnapshot, "no wrapper when the snapshot is disabled")
+	require.Nil(t, b.cancel, "no refresh goroutine when the snapshot is disabled")
+	require.Zero(t, fake.runCount(), "fullrt builds its own crawler when the snapshot is disabled")
 }

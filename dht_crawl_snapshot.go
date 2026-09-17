@@ -46,6 +46,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // crawlSnapshotFormatVersion is the version written in every crawl snapshot's
@@ -72,6 +74,72 @@ const crawlReplayAddrTTL = 10 * time.Minute
 // it into place. A hard exit mid-save orphans it, so a load sweeps matches
 // from the snapshot directory.
 const crawlSnapshotTempPattern = ".dht-crawl-*.tmp"
+
+// crawlSubsystem is the metric subsystem for everything in this file:
+// someguy_dht_crawl_*.
+const crawlSubsystem = "dht_crawl"
+
+const (
+	crawlSnapshotOp     = "op"
+	crawlSnapshotOpSave = "save"
+	crawlSnapshotOpLoad = "load"
+)
+
+var (
+	// crawlDurationSeconds and crawlPeers describe the crawl itself, not the
+	// snapshot, and are worth having whether or not the snapshot is enabled:
+	// the only other source is the fullrt logger's "crawl took" line, which
+	// production silences. They are set by the wrapper, so they exist only
+	// when the snapshot is on.
+	crawlDurationSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "duration_seconds",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Duration of the last completed DHT crawl in seconds",
+	})
+
+	crawlPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "peers",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Number of peers found by the last completed DHT crawl",
+	})
+
+	crawlSnapshotPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_peers",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Number of peers in the last successfully saved DHT crawl snapshot",
+	})
+
+	crawlSnapshotLastSuccessTimestampSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_last_success_timestamp_seconds",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Unix timestamp of the last successful DHT crawl snapshot save",
+	})
+
+	crawlSnapshotRestoredPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_restored_peers",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Number of peers replayed from the DHT crawl snapshot at startup, 0 when nothing was replayed",
+	})
+
+	crawlSnapshotAgeSecondsAtRestore = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "snapshot_age_seconds_at_restore",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Age in seconds of the DHT crawl snapshot that was replayed at startup",
+	})
+
+	crawlSnapshotErrorsCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name:      "snapshot_errors",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Number of failed DHT crawl snapshot operations",
+	}, []string{crawlSnapshotOp})
+)
 
 // crawlSnapshotHeader is the first line of a crawl snapshot.
 type crawlSnapshotHeader struct {
@@ -205,6 +273,7 @@ func (c *snapshotCrawler) replay(ctx context.Context, handleSuccess crawler.Hand
 	c.mu.Lock()
 	c.replayed = true
 	c.mu.Unlock()
+	crawlSnapshotAgeSecondsAtRestore.Set(age.Seconds())
 
 	replayed := 0
 	for _, p := range peers {
@@ -213,6 +282,7 @@ func (c *snapshotCrawler) replay(ctx context.Context, handleSuccess crawler.Hand
 			// Shutdown, or a crawl the caller gave up on. Stop where we are:
 			// the partial table is fullrt's problem to refresh, and the file
 			// on disk is untouched either way.
+			crawlSnapshotRestoredPeers.Set(float64(replayed))
 			logger.Infof("dht crawl snapshot replay cancelled after %d of %d peers", replayed, len(peers))
 			return true
 		default:
@@ -222,6 +292,7 @@ func (c *snapshotCrawler) replay(ctx context.Context, handleSuccess crawler.Hand
 		replayed++
 	}
 
+	crawlSnapshotRestoredPeers.Set(float64(replayed))
 	logger.Infof("replayed dht crawl snapshot: %d peers, snapshot age %s, replay duration %s",
 		replayed, age.Round(time.Second), time.Since(start).Round(time.Millisecond))
 	return true
@@ -269,15 +340,20 @@ func (c *snapshotCrawler) crawl(ctx context.Context, startingPeers []*peer.AddrI
 	c.lastPeers = len(crawled)
 	c.lastDur = dur
 	c.mu.Unlock()
+	crawlDurationSeconds.Set(dur.Seconds())
+	crawlPeers.Set(float64(len(crawled)))
 
 	if len(crawled) < crawlSnapshotMinPeers {
 		logger.Warnf("dht crawl found only %d peers, fewer than the %d needed for a snapshot; not saving", len(crawled), crawlSnapshotMinPeers)
 		return
 	}
 	if err := c.save(crawled); err != nil {
+		crawlSnapshotErrorsCounter.WithLabelValues(crawlSnapshotOpSave).Inc()
 		logger.Warnf("saving dht crawl snapshot to %s: %v", c.path, err)
 		return
 	}
+	crawlSnapshotPeers.Set(float64(len(crawled)))
+	crawlSnapshotLastSuccessTimestampSeconds.Set(float64(time.Now().Unix()))
 	logger.Infof("saved dht crawl snapshot of %d peers to %s, crawl duration %s", len(crawled), c.path, dur.Round(time.Millisecond))
 }
 
@@ -354,6 +430,7 @@ func (c *snapshotCrawler) load() (peers []crawlSnapshotPeer, age time.Duration, 
 		if errors.Is(err, fs.ErrNotExist) {
 			logger.Infof("no dht crawl snapshot at %s yet, crawling", c.path)
 		} else {
+			crawlSnapshotErrorsCounter.WithLabelValues(crawlSnapshotOpLoad).Inc()
 			logger.Warnf("opening dht crawl snapshot %s: %v", c.path, err)
 		}
 		return nil, 0, false
@@ -364,6 +441,7 @@ func (c *snapshotCrawler) load() (peers []crawlSnapshotPeer, age time.Duration, 
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1 MiB max token
 
 	if !scanner.Scan() {
+		crawlSnapshotErrorsCounter.WithLabelValues(crawlSnapshotOpLoad).Inc()
 		if err := scanner.Err(); err != nil {
 			logger.Warnf("reading dht crawl snapshot header from %s: %v", c.path, err)
 		} else {
@@ -373,10 +451,12 @@ func (c *snapshotCrawler) load() (peers []crawlSnapshotPeer, age time.Duration, 
 	}
 	var header crawlSnapshotHeader
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+		crawlSnapshotErrorsCounter.WithLabelValues(crawlSnapshotOpLoad).Inc()
 		logger.Warnf("decoding dht crawl snapshot header from %s: %v", c.path, err)
 		return nil, 0, false
 	}
 	if header.Version != crawlSnapshotFormatVersion {
+		crawlSnapshotErrorsCounter.WithLabelValues(crawlSnapshotOpLoad).Inc()
 		logger.Warnf("dht crawl snapshot %s has unsupported version %d, want %d; crawling", c.path, header.Version, crawlSnapshotFormatVersion)
 		return nil, 0, false
 	}
@@ -415,6 +495,7 @@ func (c *snapshotCrawler) load() (peers []crawlSnapshotPeer, age time.Duration, 
 		peers = append(peers, crawlSnapshotPeer{id: entry.ID, addrs: addrs})
 	}
 	if err := scanner.Err(); err != nil {
+		crawlSnapshotErrorsCounter.WithLabelValues(crawlSnapshotOpLoad).Inc()
 		logger.Warnf("reading dht crawl snapshot %s: %v", c.path, err)
 		return nil, 0, false
 	}

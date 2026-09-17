@@ -94,6 +94,12 @@ func main() {
 						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL"},
 						Usage:   "how often to snapshot the cached address book to <datadir>/cached-addr-book.ndjson so a restart starts warm; 0 disables",
 					},
+					&cli.DurationFlag{
+						Name:    "dht-crawl-snapshot-max-age",
+						Value:   0,
+						EnvVars: []string{"SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE"},
+						Usage:   "persist the accelerated DHT client's routing table to <datadir>/dht-crawl.ndjson after every crawl and replay it at startup if it is younger than this, so a restart is warm in seconds; 0 disables",
+					},
 					&cli.StringFlag{
 						Name:    "dnsaddr-resolution",
 						Value:   string(DNSAddrResolutionAppend),
@@ -288,6 +294,10 @@ func main() {
 					if err != nil {
 						return err
 					}
+					crawlSnapshotPath, crawlSnapshotMaxAge, err := crawlSnapshotFlagConfig(ctx.String("datadir"), ctx.String("dht"), ctx.Duration("dht-crawl-snapshot-max-age"))
+					if err != nil {
+						return err
+					}
 					cfg := &config{
 						listenAddress:                  ctx.String("listen-address"),
 						dhtType:                        ctx.String("dht"),
@@ -300,6 +310,8 @@ func main() {
 						cachedAddrBookSnapshotPath:     snapshotPath,
 						cachedAddrBookSnapshotInterval: snapshotInterval,
 						cachedAddrBookNegativeTTL:      negativeTTL,
+						dhtCrawlSnapshotPath:           crawlSnapshotPath,
+						dhtCrawlSnapshotMaxAge:         crawlSnapshotMaxAge,
 						routingTimeout:                 ctx.Duration("routing-timeout"),
 						dnsAddrResolution:              dnsAddrResolution,
 						recordsLimit:                   recordsLimit,
@@ -346,6 +358,9 @@ func main() {
 					}
 					if cfg.findPeerDialTimeout != DefaultFindPeerDialTimeout {
 						fmt.Printf("SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT = %s\n", cfg.findPeerDialTimeout)
+					}
+					if cfg.dhtCrawlSnapshotMaxAge > 0 {
+						fmt.Printf("SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE = %s\n", cfg.dhtCrawlSnapshotMaxAge)
 					}
 					if cfg.pprof {
 						fmt.Printf("SOMEGUY_PPROF = true\n")
@@ -599,6 +614,28 @@ func snapshotFlagConfig(datadir string, cachedAddrBook bool, dhtType string, int
 		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --datadir is empty; the snapshot is written to <datadir>/cached-addr-book.ndjson, so set --datadir (SOMEGUY_DATADIR) too, or set --cached-addr-book-snapshot-interval to 0 to disable it")
 	}
 	return filepath.Join(datadir, "cached-addr-book.ndjson"), interval, nil
+}
+
+// crawlSnapshotFlagConfig validates the DHT crawl snapshot flag and derives
+// the snapshot path, returning the path and the maximum age a snapshot may
+// have to still be replayed. A max age of 0 disables the snapshot and leaves
+// the path empty; a positive max age requires datadir, because the snapshot is
+// written to <datadir>/dht-crawl.ndjson, and the accelerated DHT client, which
+// is the only one with a crawled routing table to save.
+func crawlSnapshotFlagConfig(datadir, dhtType string, maxAge time.Duration) (path string, snapshotMaxAge time.Duration, err error) {
+	if maxAge < 0 {
+		return "", 0, fmt.Errorf("dht-crawl-snapshot-max-age must be non-negative, got %s", maxAge)
+	}
+	if maxAge == 0 {
+		return "", 0, nil
+	}
+	if dhtType != "accelerated" {
+		return "", 0, fmt.Errorf("--dht-crawl-snapshot-max-age is set but --dht is %s; only the accelerated client crawls a routing table to snapshot, so set --dht to accelerated (SOMEGUY_DHT) or set --dht-crawl-snapshot-max-age to 0 to disable the snapshot", dhtType)
+	}
+	if datadir == "" {
+		return "", 0, fmt.Errorf("--dht-crawl-snapshot-max-age is set but --datadir is empty; the snapshot is written to <datadir>/dht-crawl.ndjson, so set --datadir (SOMEGUY_DATADIR) too, or set --dht-crawl-snapshot-max-age to 0 to disable it")
+	}
+	return filepath.Join(datadir, "dht-crawl.ndjson"), maxAge, nil
 }
 
 func printIfListConfigured(message string, list []string) {
