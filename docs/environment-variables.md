@@ -13,6 +13,7 @@ The environment variables below override `someguy`'s built-in defaults.
   - [`SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS`](#someguy_cached_addr_book_max_concurrent_find_peers)
   - [`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`](#someguy_cached_addr_book_snapshot_interval)
   - [`SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL`](#someguy_cached_addr_book_negative_ttl)
+  - [`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`](#someguy_dht_crawl_snapshot_max_age)
   - [`SOMEGUY_DNSADDR_RESOLUTION`](#someguy_dnsaddr_resolution)
   - [`SOMEGUY_ROUTING_TIMEOUT`](#someguy_routing_timeout)
   - [`SOMEGUY_DHT_TAIL_BUDGET`](#someguy_dht_tail_budget)
@@ -110,7 +111,7 @@ How often to write the cached address book to `<datadir>/cached-addr-book.ndjson
 
 The restore is synchronous and finishes before the HTTP listener is up: about 1.76 s per 200,000 peers on local SSD, so a cache at the 1,000,000-peer cap adds roughly 9 s to startup, which health-check and readiness timeouts must cover. The file is about 260 bytes per peer, around 250 MiB at that cap, so `SOMEGUY_DATADIR` needs headroom for it.
 
-The snapshot holds the addresses with their TTLs, reconstructed from the time each peer's addresses were last written, and the probe backoff state, so a restart does not re-dial peers Someguy has already given up on. It does not hold signed peer records (re-learned on the next identify), the accelerated DHT routing table (crawled again on start), or the host peerstore.
+The snapshot holds the addresses with their TTLs, reconstructed from the time each peer's addresses were last written, and the probe backoff state, so a restart does not re-dial peers Someguy has already given up on. It does not hold signed peer records (re-learned on the next identify), the accelerated DHT routing table (that has a snapshot of its own, `SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`), or the host peerstore.
 
 The periodic write is the guarantee: a clean shutdown writes one more time, but an OOM kill skips shutdown, so the interval bounds how stale a restart can be.
 
@@ -131,6 +132,20 @@ The failure it reads is the same one that drives probe backoff, recorded by `Rec
 Independently of this setting, concurrent `/routing/v1/peers` requests for the same peer ID are collapsed into a single DHT lookup, so a popular missing peer does not start one full-timeout walk per in-flight request.
 
 Applies only when `SOMEGUY_CACHED_ADDR_BOOK` is enabled.
+
+Default: `0` (disabled)
+
+### `SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`
+
+How old the accelerated DHT client's routing-table snapshot may be and still be replayed at startup. The table is written to `<datadir>/dht-crawl.ndjson` after every completed crawl, and replayed on the next start when the file is younger than this, so a restart is ready in seconds instead of after a full crawl.
+
+Someguy only answers from the accelerated client once it reports itself ready, which takes a completed crawl of the network - minutes, during which every request falls back to the standard DHT client. The snapshot removes that gap: the replay feeds the saved peers and their addresses straight into the accelerated client without dialling anything, and a real crawl is triggered the moment the replayed table is in place. A replayed table is therefore only as stale as the last completed crawl plus the downtime, and only until that crawl finishes.
+
+The file is written after every completed crawl and at no other time: not on a timer, and not at shutdown. The table only changes when a crawl completes, so there is nothing else to write. A crawl cut short by shutdown is not saved, and neither is an implausibly small one (under 1,000 peers, where a settled table is 10,000 to 25,000), because a broken crawl is worth neither saving nor replaying. A snapshot that is missing, too old, too small, or unreadable is logged and ignored, and Someguy crawls as it would have.
+
+Requires `SOMEGUY_DATADIR`, because the snapshot is written to `<datadir>/dht-crawl.ndjson`, and `SOMEGUY_DHT=accelerated`, because no other client has a crawled routing table; Someguy refuses to start if either is missing. The file holds one line per peer with its public addresses, roughly 100 bytes per peer, so a settled table is a few megabytes. Watch the crawls and the replay with the `someguy_dht_crawl_*` metrics in [metrics.md](metrics.md).
+
+A value of `2h` is a reasonable start: it covers a restart or a deploy, while a table older than two crawl intervals has drifted enough that crawling from cold is the safer beginning.
 
 Default: `0` (disabled)
 

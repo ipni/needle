@@ -254,9 +254,23 @@ address, so the skew ages out quickly. The snapshot also restores the probe
 backoff state, so a restart does not re-dial peers someguy has already given
 up on.
 
+The accelerated DHT client's routing table has a second, separate snapshot,
+also optional and off by default, written to `<datadir>/dht-crawl.ndjson` after
+every completed crawl and replayed at the next start when it is younger than
+`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`. It saves what the crawl found - each peer
+and its public addresses - and replays it by feeding those peers straight into
+the accelerated client, which is otherwise not ready until a crawl of the whole
+network completes. Nothing is dialled to replay it, so the table it produces is
+as stale as the last crawl plus the downtime; a real crawl is triggered as soon
+as the replayed table is in place, and the file is rewritten when that crawl
+finishes. It is a snapshot of crawl results rather than of addresses, and it
+shares nothing with the address book snapshot but a directory: either can be
+enabled without the other.
+
 someguy passes no datastore to the DHT, so value records, including IPNS
 records written through `PUT /routing/v1/ipns/{name}`, live in memory and are
-lost on restart. The address cache is in memory too.
+lost on restart - neither snapshot changes that. The address cache is in memory
+too.
 
 Adding a persistent datastore is possible and small, but it buys little as
 deployed. A `PUT` lands on one instance behind the load balancer, and a later

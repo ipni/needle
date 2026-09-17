@@ -12,10 +12,18 @@
 // each of its peers hands fullrt a full table in seconds, with no network
 // activity.
 //
-// This is a wrapper around crawler.Crawler rather than a change to
-// go-libp2p-kad-dht: it is built only on the public option surface
-// (fullrt.WithCrawler, the crawler.Crawler interface, FullRT.TriggerRefresh),
-// so someguy does not have to carry a fork of kad-dht.
+// One thing stands in the way of that, and it is why someguy pins the ipni
+// fork of go-libp2p-kad-dht. fullrt runs every peer the crawler reports through
+// a route table filter, whose default keeps a peer only while the host has an
+// open connection to it - true of a peer the crawler just dialled, never true
+// of a replayed one. The fork adds fullrt.WithRouteTableFilter so the caller
+// can supply that filter; server_dht.go supplies one that judges a replayed
+// peer on its addresses instead, and leaves real crawls on the default. Without
+// it the replay runs and every peer it reports is silently dropped.
+//
+// Everything else here is the public option surface (fullrt.WithCrawler, the
+// crawler.Crawler interface, FullRT.TriggerRefresh): a crawler wrapper, not a
+// rewrite of kad-dht.
 //
 // A replayed table is exactly as stale as the last completed crawl plus the
 // downtime, and nothing in the replay re-checks whether those peers are still
@@ -174,6 +182,7 @@ type snapshotCrawler struct {
 	mu        sync.Mutex
 	runs      int
 	replayed  bool
+	replaying bool
 	lastPeers int
 	lastDur   time.Duration
 
@@ -249,6 +258,18 @@ func (c *snapshotCrawler) Replayed() bool {
 	return c.replayed
 }
 
+// isReplaying reports whether a replay is running right now. The caller's
+// route table filter needs it: a replayed peer has to be judged on its
+// addresses, because there is no connection to it, while a peer a real crawl
+// reports must still face fullrt's unmodified default. handleSuccess, and so
+// the filter, is called from the replay's own goroutine, so this is true for
+// exactly the peers the replay reports.
+func (c *snapshotCrawler) isReplaying() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.replaying
+}
+
 // lastCrawl returns the peer count and duration of the last real crawl that
 // ran to completion. It is zero until one has, and a crawl cut short by a
 // cancelled context does not update it, so a shutdown does not leave a
@@ -272,7 +293,13 @@ func (c *snapshotCrawler) replay(ctx context.Context, handleSuccess crawler.Hand
 
 	c.mu.Lock()
 	c.replayed = true
+	c.replaying = true
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.replaying = false
+		c.mu.Unlock()
+	}()
 	crawlSnapshotAgeSecondsAtRestore.Set(age.Seconds())
 
 	replayed := 0

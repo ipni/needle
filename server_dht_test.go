@@ -460,32 +460,27 @@ func useFakeInnerCrawler(t *testing.T, fake *fakeInnerCrawler) {
 	t.Cleanup(func() { newDefaultCrawler = prev })
 }
 
-// TestCrawlSnapshotReplayIsFilteredOutByFullRT records why replaying a
-// snapshot does not, today, make the accelerated client ready.
+// TestCrawlSnapshotReplayMakesFullRTReady is the point of the whole snapshot:
+// a restart that replays a recent crawl is ready in seconds, having dialled
+// nothing.
 //
-// The replay does everything it is supposed to: the addresses land in the host
-// peerstore and every saved peer is reported through handleSuccess. But fullrt
-// runs each reported peer through kaddht.PublicRoutingTableFilter before it
-// keeps it (fullrt/dht.go:370-373 in go-libp2p-kad-dht v0.42.1, unchanged in
-// the ipni fork), and that filter starts with
+// It only works because newBundledDHT supplies replayAwareRouteTableFilter.
+// fullrt's default filter keeps a peer only while the host has an open
+// connection to it, which a replay can never satisfy; supplying a filter needs
+// fullrt.WithRouteTableFilter, from the ipni kad-dht fork this module pins.
 //
-//	conns := d.Host().Network().ConnsToPeer(p)
-//	if len(conns) == 0 { return false }
-//
-// (dht_filters.go:87-105). A real crawl passes it because the crawler has just
-// dialled the peer and the connection is still open; a replay never dials, so
-// every replayed peer is dropped and the routing table stays empty.
-//
-// Nothing on fullrt's public option surface overrides that filter, so the
-// wrapper cannot fix this from outside kad-dht. If a future kad-dht lets the
-// route-table filter be supplied, this test fails and should be turned back
-// into the Ready() assertion it was meant to be.
-func TestCrawlSnapshotReplayIsFilteredOutByFullRT(t *testing.T) {
+// The refresh that follows the replay is held in the fake crawler for the
+// duration of the assertions. In production that crawl dials, so the peers it
+// reports pass the unmodified filter and it replaces the replayed table with a
+// fresh one; a fake crawl dials nothing, so letting it finish here would empty
+// the table instead, which says nothing about the replay.
+func TestCrawlSnapshotReplayMakesFullRTReady(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dht-crawl.ndjson")
 	saved := genCrawlPeers(t, 1500)
 	writeCrawlSnapshot(t, path, crawlSnapshotFormatVersion, time.Now().Add(-time.Minute), saved)
 
-	fake := &fakeInnerCrawler{}
+	release := make(chan struct{})
+	fake := &fakeInnerCrawler{report: func(crawler.HandleQueryResult) { <-release }}
 	useFakeInnerCrawler(t, fake)
 
 	h, err := libp2p.New(libp2p.NoListenAddrs)
@@ -494,29 +489,62 @@ func TestCrawlSnapshotReplayIsFilteredOutByFullRT(t *testing.T) {
 
 	b, err := newBundledDHT(h, nil, DefaultFindPeerGrace, DefaultFindPeerDialTimeout, path, time.Hour)
 	require.NoError(t, err)
-	t.Cleanup(func() { b.Close() })
+	t.Cleanup(func() {
+		close(release)
+		b.Close()
+	})
 	require.NotNil(t, b.crawlSnapshot)
 
-	// The replay itself ran, and left the addresses where the crawl that
-	// follows will look for them.
-	<-b.crawlSnapshot.FirstRunDone()
+	require.Eventually(t, func() bool { return b.fullRT.Ready() }, 10*time.Second, 50*time.Millisecond,
+		"a replayed snapshot must make the accelerated client ready without touching the network")
 	require.True(t, b.crawlSnapshot.Replayed())
 	require.Equal(t, float64(len(saved)), testutil.ToFloat64(crawlSnapshotRestoredPeers))
+	require.Len(t, b.fullRT.Stat(), len(saved))
+
+	// Nothing was dialled to get there, and the addresses are where the crawl
+	// that follows looks for them.
+	require.Empty(t, h.Network().ConnsToPeer(saved[0].id))
 	require.Equal(t, saved[0].addrs[0].String(), h.Peerstore().Addrs(saved[0].id)[0].String())
 
-	// The refresh the replay triggers does fire, and it is a real crawl.
+	// That crawl is real, and seeded with the replayed peers.
 	require.Eventually(t, func() bool { return fake.runCount() == 1 }, 10*time.Second, 50*time.Millisecond,
 		"a replay must be followed by a real crawl")
+	require.GreaterOrEqual(t, len(fake.lastStarting()), len(saved))
+}
 
-	// It is seeded with nothing, though: fullrt seeds a refresh from the peers
-	// the previous crawl kept, and it kept none of the replayed ones. In
-	// production that leaves the bootstrap peers, which is a cold crawl.
-	require.Empty(t, fake.lastStarting(), "the refresh is seeded from fullrt's table, which the filter left empty")
+// TestCrawlSnapshotRealCrawlKeepsUpstreamFilter holds the other half of
+// replayAwareRouteTableFilter: outside a replay it must not widen anything, so
+// a peer a real crawl reports without an open connection is dropped exactly as
+// upstream drops it.
+func TestCrawlSnapshotRealCrawlKeepsUpstreamFilter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dht-crawl.ndjson") // no file: a cold start
+	crawled := genCrawlPeers(t, 1500)
 
-	// fullrt kept none of the replayed peers, so it is not ready.
-	require.Zero(t, len(b.fullRT.Stat()), "fullrt drops every peer it has no open connection to")
+	fake := &fakeInnerCrawler{report: func(handleSuccess crawler.HandleQueryResult) {
+		for _, p := range crawled {
+			handleSuccess(p.id, nil)
+		}
+	}}
+	useFakeInnerCrawler(t, fake)
+
+	h, err := libp2p.New(libp2p.NoListenAddrs)
+	require.NoError(t, err)
+	t.Cleanup(func() { h.Close() })
+	// Addresses the fake crawl would have left behind, public and dialable,
+	// but with no connection because nothing was really dialled.
+	for _, p := range crawled {
+		h.Peerstore().AddAddrs(p.id, p.addrs, time.Hour)
+	}
+
+	b, err := newBundledDHT(h, nil, DefaultFindPeerGrace, DefaultFindPeerDialTimeout, path, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+
+	<-b.crawlSnapshot.FirstRunDone()
+	require.False(t, b.crawlSnapshot.Replayed(), "no file, so this is a real crawl")
+	require.Eventually(t, func() bool { return fake.runCount() == 1 }, 10*time.Second, 50*time.Millisecond)
+	require.Empty(t, b.fullRT.Stat(), "outside a replay the upstream filter still requires a connection")
 	require.False(t, b.fullRT.Ready())
-	require.Zero(t, len(h.Network().ConnsToPeer(saved[0].id)), "the replay dials nothing, which is the point of it")
 }
 
 func TestCrawlSnapshotDisabledUsesDefaultCrawler(t *testing.T) {

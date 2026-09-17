@@ -15,6 +15,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 type bundledDHT struct {
@@ -51,6 +52,38 @@ const (
 // nothing in production reassigns it.
 var newDefaultCrawler = func(h host.Host) (crawler.Crawler, error) {
 	return crawler.NewDefaultCrawler(h, crawler.WithParallelism(200))
+}
+
+// replayAwareRouteTableFilter widens fullrt's default route table filter for
+// the peers a snapshot replay reports, and only for those.
+//
+// fullrt's default, dht.PublicRoutingTableFilter, keeps a peer only while the
+// host has an open connection to it. A crawl satisfies that because the crawler
+// has just dialled every peer it reports. A replay dials nothing - that is the
+// whole point of it - so without this every replayed peer is dropped and the
+// routing table stays empty.
+//
+// A replayed peer is therefore judged on the rest of what the default asks: a
+// public, non-relay address in the peerstore. The snapshot only ever holds
+// public addresses and the replay writes them back before reporting the peer,
+// so this accepts exactly the peers the file vouches for. Outside a replay the
+// filter is the upstream default, unchanged, so real crawls build the table
+// they always did.
+func replayAwareRouteTableFilter(h host.Host, sc *snapshotCrawler) dht.RouteTableFilterFunc {
+	return func(d any, p peer.ID) bool {
+		if dht.PublicRoutingTableFilter(d, p) {
+			return true
+		}
+		if !sc.isReplaying() {
+			return false
+		}
+		for _, a := range h.Peerstore().Addrs(p) {
+			if manet.IsPublicAddr(a) && !isRelayAddr(a) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // newBundledDHT builds the accelerated client: a standard DHT client that
@@ -92,7 +125,10 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrac
 			standardDHT.Close()
 			return nil, err
 		}
-		fullRTOpts = append(fullRTOpts, fullrt.WithCrawler(crawlSnapshot))
+		fullRTOpts = append(fullRTOpts,
+			fullrt.WithCrawler(crawlSnapshot),
+			fullrt.WithRouteTableFilter(replayAwareRouteTableFilter(h, crawlSnapshot)),
+		)
 	}
 
 	fullRT, err := fullrt.NewFullRT(h, "/ipfs", fullRTOpts...)

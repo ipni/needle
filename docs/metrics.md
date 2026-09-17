@@ -34,6 +34,28 @@ When Someguy aggregates other `/routing/v1` endpoints, `boxo/routing/http/client
 
 The five snapshot gauges read `0` while the address book snapshot is disabled (`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL` at `0`). The errors counter has no `_total` suffix (matching `probed_peers`), and each of its `op` series only appears after the first error of that kind, so alerts must handle the absent series.
 
+### Accelerated DHT crawl
+
+The accelerated client builds its routing table by crawling, and with
+`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE` set it saves that table after every crawl
+and replays it at startup. These metrics exist only while that is enabled;
+nothing else reports the crawl, whose only other trace is a log line from
+go-libp2p-kad-dht.
+
+- `someguy_dht_crawl_duration_seconds`: gauge of the duration of the last completed crawl in seconds. A crawl cancelled by shutdown does not update it
+- `someguy_dht_crawl_peers`: gauge of the peers found by the last completed crawl. A settled table is 10,000 to 25,000; a much smaller number is a broken crawl
+- `someguy_dht_crawl_snapshot_peers`: gauge of the peers in the last successfully saved snapshot
+- `someguy_dht_crawl_snapshot_last_success_timestamp_seconds`: gauge of the Unix timestamp of the last successful snapshot save
+- `someguy_dht_crawl_snapshot_restored_peers`: gauge of the peers replayed from the snapshot at startup, `0` when nothing was replayed
+- `someguy_dht_crawl_snapshot_age_seconds_at_restore`: gauge of the age of the snapshot that was replayed at startup
+- `someguy_dht_crawl_snapshot_errors{op}`: counter of failed snapshot operations, labeled `save` or `load`
+
+A snapshot that is absent, older than the configured max age, or too small to be
+worth replaying is an expected state rather than an error, so it is not counted
+in `snapshot_errors`; an unreadable or malformed file is. Like the address book
+counter, it has no `_total` suffix, and each `op` series only appears after the
+first error of that kind, so alerts must handle the absent series.
+
 ### Parallel router
 
 When more than one router serves an operation, Someguy fans the request out to
