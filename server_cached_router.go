@@ -29,6 +29,18 @@ var (
 		[]string{addrCacheStateLabel, addrQueryOriginLabel},
 	)
 
+	// findPeerLookupsJoined counts FindPeers calls that attached to a lookup
+	// already in flight for the same peer ID instead of starting their own. It
+	// is the size of the duplicate-work saving: against find_peer_lookups_*
+	// and the peers request rate it says how much of the peers traffic is
+	// concurrent requests for the same peer.
+	findPeerLookupsJoined = promauto.NewCounter(prometheus.CounterOpts{
+		Name:      "find_peer_lookups_joined",
+		Subsystem: "cached_router",
+		Namespace: name,
+		Help:      "Number of FindPeers calls that joined an in-flight lookup for the same peer instead of starting one",
+	})
+
 	// findPeerLookupsInFlight shows how close the background lookups run to
 	// their cap. It is the signal for whether DefaultMaxConcurrentFindPeers is
 	// sized right: steady state well under the cap means normal traffic never
@@ -83,6 +95,14 @@ const (
 
 	DispatchedFindPeersTimeout = time.Minute
 )
+
+func init() {
+	// Create the negative series up front. It is only written when the negative
+	// TTL is on, and a counter that never appears is indistinguishable from a
+	// counter that is absent because the build is old, which makes it awkward
+	// to alert on. Registering it at zero removes that ambiguity.
+	peerAddrLookups.WithLabelValues(addrCacheStateNegative, addrQueryOriginPeers)
+}
 
 // cachedRouter wraps a router with the cachedAddrBook to retrieve cached addresses for peers without multiaddrs in FindProviders
 // it will also dispatch a FindPeer when a provider has no multiaddrs using the cacheFallbackIter
@@ -157,7 +177,12 @@ func (r cachedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (it
 	// so if that caller goes away the waiters see its cancellation - the usual
 	// singleflight trade-off, and acceptable here because the alternative is
 	// the duplicate DHT walks this exists to remove.
+	// singleflight runs fn in the first caller's goroutine, so a caller whose
+	// closure never ran is one that attached to a lookup already in flight.
+	// The flag is written and read by this goroutine alone.
+	startedLookup := false
 	v, err, _ := r.findPeerGroup.Do(pid.String(), func() (any, error) {
+		startedLookup = true
 		it, err := r.router.FindPeers(ctx, pid, limit)
 		if err == routing.ErrNotFound {
 			// Record the failure used for probing/backoff purposes, and which
@@ -188,6 +213,9 @@ func (r cachedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (it
 		}
 		return recs, nil
 	})
+	if !startedLookup {
+		findPeerLookupsJoined.Inc()
+	}
 	if err != nil {
 		return nil, err
 	}

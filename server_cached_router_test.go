@@ -709,6 +709,7 @@ func TestFindPeersSingleflight(t *testing.T) {
 	cab, err := newCachedAddrBook()
 	require.NoError(t, err)
 	cr := NewCachedRouter(mr, cab, 0)
+	joinedBefore := testutil.ToFloat64(findPeerLookupsJoined)
 
 	const n = 2
 	var wg sync.WaitGroup
@@ -740,6 +741,9 @@ func TestFindPeersSingleflight(t *testing.T) {
 		require.NoError(t, errs[i])
 		require.Equal(t, 1, results[i], "caller %d got no records", i)
 	}
+	// One caller started the lookup, the other joined it.
+	require.Equal(t, joinedBefore+1, testutil.ToFloat64(findPeerLookupsJoined),
+		"the caller that did not start the lookup must be counted as joined")
 }
 
 // blockingPeersRouter holds FindPeers open until released, so a test can get two

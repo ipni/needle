@@ -29,7 +29,8 @@ When Someguy aggregates other `/routing/v1` endpoints, `boxo/routing/http/client
 - `someguy_cached_addr_book_snapshot_restored_peers`: gauge of peers restored from the address book snapshot at startup
 - `someguy_cached_addr_book_snapshot_restored_addrs`: gauge of addresses offered to the address book when restoring the snapshot at startup
 - `someguy_cached_addr_book_snapshot_errors{op}`: counter of failed address book snapshot operations, labeled `save` or `load`
-- `someguy_cached_router_peer_addr_lookups{cache,origin}`: counter of peer address-info lookups per origin and cache state. `cache="negative"` counts `/routing/v1/peers` requests answered as not-found from a recorded earlier failure without reaching the DHT, and only appears while `SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL` is above `0`
+- `someguy_cached_router_peer_addr_lookups{cache,origin}`: counter of peer address-info lookups per origin and cache state. `cache="negative"` counts `/routing/v1/peers` requests answered as not-found from a recorded earlier failure without reaching the DHT. The series is registered at `0` on startup, so it is present even while `SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL` is `0` and stays flat rather than absent
+- `someguy_cached_router_find_peer_lookups_joined`: counter of `/routing/v1/peers` requests that attached to a DHT lookup already in flight for the same peer ID instead of starting their own. Always on; against the peers request rate it is the share of peers traffic that is concurrent requests for the same peer
 
 The five snapshot gauges read `0` while the address book snapshot is disabled (`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL` at `0`). The errors counter has no `_total` suffix (matching `probed_peers`), and each of its `op` series only appears after the first error of that kind, so alerts must handle the absent series.
 

@@ -99,7 +99,9 @@ Default: `0` (disabled)
 
 How long a failed peer lookup suppresses further DHT lookups for that peer. Within the TTL, `/routing/v1/peers/{peer-id}` is answered as not-found straight from the failure recorded by the previous lookup, without a DHT query.
 
-A DHT lookup for a peer nobody reports costs the full query timeout, and the same absent peers are requested repeatedly, so those requests dominate the slow tail of the peers endpoint while telling us nothing new. This trades freshness for that latency: a peer that comes back online within the TTL keeps being reported as not-found until the TTL lapses.
+A DHT lookup for a peer nobody reports costs the full query timeout, and the same absent peers are requested repeatedly, so those requests dominate the slow tail of the peers endpoint while telling us nothing new.
+
+The trade-off: a peer that comes online is invisible on that instance for at most the TTL, which is one client retry cycle. `1m` is a reasonable starting point - long enough to absorb the repeated lookups for a genuinely absent peer, short enough that a peer coming back is picked up on the client's next retry.
 
 The failure it reads is the same one that drives probe backoff, recorded by `RecordFailedConnection`, so a peer that someguy successfully connects to has the record cleared and is not suppressed. Suppressed requests are counted as `someguy_cached_router_peer_addr_lookups{cache="negative"}` in [metrics.md](metrics.md); compare that against the `miss` series to see how much of the peers traffic it is absorbing.
 
