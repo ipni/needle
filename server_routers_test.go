@@ -1094,6 +1094,37 @@ func TestRouterName(t *testing.T) {
 	require.Equal(t, "other", routerName(nil))
 }
 
+// TestCuttableThroughRealWrappers holds the property the whole tail cut rests
+// on: the DHT as combineRouters actually assembles it is recognised as
+// cuttable. The cut tests above stand a fake in for the DHT, so they check the
+// arming and the labels but never the assertion itself against a real
+// libp2pRouter behind real wrappers - and a direct ri.(dhtMarker), which is
+// what an earlier draft of find used, is false for every shape here, leaving a
+// feature that looks wired up and cuts nothing. If a new wrapper is added and
+// unwrapRouter is not taught about it, this fails.
+func TestCuttableThroughRealWrappers(t *testing.T) {
+	dht := libp2pRouter{}
+	for name, r := range map[string]router{
+		"sanitize":                sanitizeRouter{dht},
+		"sanitize+cached":         sanitizeRouter{NewCachedRouter(dht, nil)},
+		"dnsaddr+sanitize+cached": dnsAddrRouter{router: sanitizeRouter{NewCachedRouter(dht, nil)}},
+	} {
+		_, isDHT := unwrapRouter(r).(dhtMarker)
+		require.True(t, isDHT, "%s: the DHT must be cuttable through the wrappers production builds", name)
+		require.Equal(t, "dht", routerName(r), "%s: and the metric label must agree with it", name)
+	}
+
+	// The converse: nothing else is cuttable, so a cut can never cancel a
+	// delegated endpoint or a block-provider router.
+	for name, r := range map[string]router{
+		"delegated":  sanitizeRouter{clientRouter{name: "cid.contact"}},
+		"composable": composableRouter{},
+	} {
+		_, isDHT := unwrapRouter(r).(dhtMarker)
+		require.False(t, isDHT, "%s must not be cuttable", name)
+	}
+}
+
 func TestEndpointLabel(t *testing.T) {
 	require.Equal(t, "cid.contact", endpointLabel("https://cid.contact"))
 	require.Equal(t, "cid.contact", endpointLabel("https://cid.contact/routing/v1"))
