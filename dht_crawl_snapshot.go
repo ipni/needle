@@ -34,6 +34,29 @@
 // The file is rewritten after every completed crawl rather than on a timer,
 // because fullrt's table only changes when a crawl completes: between crawls
 // there is nothing new to save.
+//
+// Four fullrt behaviours hold this up, none of them part of its documented
+// contract, all of them worth re-checking the next time go-libp2p-kad-dht is
+// bumped (line numbers are v0.42.2-ipni.2):
+//
+//  1. fullrt runs the route table filter synchronously inside handleSuccess
+//     (fullrt/dht.go:408), which is what makes isReplaying() true for exactly
+//     the peers a replay reports and no others.
+//  2. It ignores rtPeers and records h.Peerstore().Addrs(p) at that moment
+//     (fullrt/dht.go:415), which is why the replay must AddAddrs before it
+//     calls handleSuccess, in that order.
+//  3. It sets lastCrawlTime after every crawl, a replayed one included
+//     (fullrt/dht.go:454), which is what lets Ready() flip without a dial.
+//  4. crawler.Run extends each starting peer with h.Peerstore().Addrs(ai.ID)
+//     and skips peers with none (crawler/crawler.go:222-235), which is the
+//     whole reason replayed addresses carry crawlReplayAddrTTL rather than
+//     being handed over and forgotten.
+//
+// If a bump breaks 1, replayed peers would be judged by the widened filter that
+// only a replay should get. If it breaks 2, the table would come up with no
+// addresses. If it breaks 3, Ready() would stay false and the replay would buy
+// nothing. If it breaks 4, the crawl after a replay would start from the
+// bootstrap peers alone, i.e. cold.
 
 package main
 
@@ -94,11 +117,12 @@ const (
 )
 
 var (
-	// crawlDurationSeconds and crawlPeers describe the crawl itself, not the
-	// snapshot, and are worth having whether or not the snapshot is enabled:
-	// the only other source is the fullrt logger's "crawl took" line, which
-	// production silences. They are set by the wrapper, so they exist only
-	// when the snapshot is on.
+	// crawlDurationSeconds and crawlPeers describe the crawl itself rather than
+	// the snapshot, and are the only numbers anything reports about it: the
+	// alternative is the fullrt logger's "crawl took" line, which production
+	// silences. Like every gauge here they are registered at init and so are
+	// always exported; only the wrapper sets them, so they read 0 until the
+	// snapshot is enabled and a crawl has completed.
 	crawlDurationSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name:      "duration_seconds",
 		Namespace: name,
@@ -148,6 +172,24 @@ var (
 		Help:      "Number of failed DHT crawl snapshot operations",
 	}, []string{crawlSnapshotOp})
 )
+
+// publicDialableAddr reports whether an address is worth putting in a snapshot:
+// public, and not a circuit-relay address. It is the one predicate the save,
+// the load and the replay's route table filter all use, so the file holds
+// exactly what the replay will accept back - a relay address passes
+// manet.IsPublicAddr on the public IP it is prefixed with, so filtering on that
+// alone would persist addresses the filter then rejects.
+//
+// It approximates rather than reproduces the address test in kad-dht's
+// PublicRoutingTableFilter, which someguy cannot call because kad-dht does not
+// export it. That one starts with manet.ToIP and rejects anything without an
+// IP, so it drops /dns4 and /dnsaddr addresses that this keeps, and its IPv6
+// rules differ slightly. The effect is a replayed table that can hold a few
+// peers a crawled table would not, which the crawl that follows a replay drops
+// again.
+func publicDialableAddr(a ma.Multiaddr) bool {
+	return manet.IsPublicAddr(a) && !isRelayAddr(a)
+}
 
 // crawlSnapshotHeader is the first line of a crawl snapshot.
 type crawlSnapshotHeader struct {
@@ -336,10 +378,11 @@ func (c *snapshotCrawler) crawl(ctx context.Context, startingPeers []*peer.AddrI
 		handleSuccess(p, rtPeers)
 
 		// The crawler has just dialled p, so its addresses are in the
-		// peerstore now. Only public ones are worth persisting: fullrt filters
-		// private peers out of the routing table anyway, and keeping them out
-		// of the file keeps them out of the peerstore on the next replay.
-		addrs := ma.FilterAddrs(c.addrs.Addrs(p), manet.IsPublicAddr)
+		// peerstore now. Only the ones a replay would accept are worth
+		// persisting: fullrt filters the rest out of the routing table anyway,
+		// and keeping them out of the file keeps them out of the peerstore on
+		// the next replay.
+		addrs := ma.FilterAddrs(c.addrs.Addrs(p), publicDialableAddr)
 		if len(addrs) == 0 {
 			return
 		}
@@ -513,8 +556,10 @@ func (c *snapshotCrawler) load() (peers []crawlSnapshotPeer, age time.Duration, 
 		}
 		// A peer with no address to replay is worse than no entry at all: it
 		// would enter the routing table with nothing to dial, and the crawl
-		// that follows would skip it for lack of addresses.
-		addrs = ma.FilterAddrs(addrs, manet.IsPublicAddr)
+		// that follows would skip it for lack of addresses. Filtered on load as
+		// well as on save, so a file written by an older build - or by hand -
+		// cannot smuggle in an address the replay would reject.
+		addrs = ma.FilterAddrs(addrs, publicDialableAddr)
 		if len(addrs) == 0 {
 			noAddrs++
 			continue

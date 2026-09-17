@@ -44,13 +44,30 @@ and it is the one to gate a rollout on. In particular
 snapshot replay reported, before the routing table filter decides what to keep,
 so it can read non-zero while the table is empty.
 
+Two things it cannot tell you, both of which matter to anything gating on it:
+
+- It reads `0` forever unless `SOMEGUY_DHT` is `accelerated`, because no other
+  mode has an accelerated client to be ready. A rollout gate has to check the
+  DHT mode too, or it waits forever on a `standard` instance for a `1` that can
+  never arrive.
+- It reads `1` on a replayed table as readily as on a crawled one, and a replay
+  dials nothing, so the table behind that `1` may be as old as
+  `SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE` with its dead entries not yet pruned.
+  That is the point of the feature - serving from a stale table beats falling
+  back to the standard client for minutes - but a rollout that wants a
+  crawl-confirmed table should also wait for
+  `someguy_dht_crawl_snapshot_last_success_timestamp_seconds` to advance past
+  process start, which happens when the crawl triggered after the replay
+  finishes and saves.
+
 ### Accelerated DHT crawl
 
 The accelerated client builds its routing table by crawling, and with
 `SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE` set it saves that table after every crawl
-and replays it at startup. These metrics exist only while that is enabled;
-nothing else reports the crawl, whose only other trace is a log line from
-go-libp2p-kad-dht.
+and replays it at startup. Only the snapshot populates them - nothing else
+reports the crawl, whose one other trace is a log line from
+go-libp2p-kad-dht - so with the snapshot disabled every gauge below is still
+exported and reads `0`.
 
 - `someguy_dht_crawl_duration_seconds`: gauge of the duration of the last completed crawl in seconds. A crawl cancelled by shutdown does not update it
 - `someguy_dht_crawl_peers`: gauge of the peers found by the last completed crawl. A settled table is 10,000 to 25,000; a much smaller number is a broken crawl
@@ -60,11 +77,20 @@ go-libp2p-kad-dht.
 - `someguy_dht_crawl_snapshot_age_seconds_at_restore`: gauge of the age of the snapshot that was replayed at startup
 - `someguy_dht_crawl_snapshot_errors{op}`: counter of failed snapshot operations, labeled `save` or `load`
 
+The six gauges read `0` while the crawl snapshot is disabled
+(`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE` at `0`), exactly as the address book
+gauges do. `0` is the Unix epoch for
+`snapshot_last_success_timestamp_seconds`, so a staleness alert of the shape
+`time() - someguy_dht_crawl_snapshot_last_success_timestamp_seconds > 2h` fires
+immediately and permanently on every instance with the snapshot off; guard it
+with `> 0` or scope it to the instances that enable the feature.
+
 A snapshot that is absent, older than the configured max age, or too small to be
 worth replaying is an expected state rather than an error, so it is not counted
-in `snapshot_errors`; an unreadable or malformed file is. Like the address book
-counter, it has no `_total` suffix, and each `op` series only appears after the
-first error of that kind, so alerts must handle the absent series.
+in `snapshot_errors`; an unreadable or malformed file is. Unlike the gauges, it
+is a counter vector: like the address book counter it has no `_total` suffix,
+and each `op` series only appears after the first error of that kind, so alerts
+must handle the absent series.
 
 ### Parallel router
 

@@ -18,6 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
 	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/stretchr/testify/require"
 )
 
@@ -167,6 +168,43 @@ func countingSuccess(mu *sync.Mutex, got *[]peer.ID) crawler.HandleQueryResult {
 		defer mu.Unlock()
 		*got = append(*got, p)
 	}
+}
+
+// TestCrawlSnapshotRelayAddrsAreNotSaved holds the predicate the save, the load
+// and the replay's route table filter share. A circuit-relay address carries a
+// public IP prefix, so manet.IsPublicAddr alone passes it: filtering on that
+// would write addresses to the file that the replay then rejects, inflating the
+// peer count that the minimum and the restored-peers gauge are read from.
+func TestCrawlSnapshotRelayAddrsAreNotSaved(t *testing.T) {
+	relay := ma.StringCast("/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWCZ67sU8oCvKd82Y6c9NgpqgoZYuZEUcg4upHCjK3n1aj/p2p-circuit")
+	require.True(t, manet.IsPublicAddr(relay), "a relay addr looks public, which is the trap")
+	require.False(t, publicDialableAddr(relay), "but it is not one the replay would accept")
+	require.True(t, publicDialableAddr(ma.StringCast("/ip4/1.2.3.4/tcp/4001")))
+	require.False(t, publicDialableAddr(ma.StringCast("/ip4/10.0.0.1/tcp/4001")))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dht-crawl.ndjson")
+
+	public := genCrawlPeers(t, crawlSnapshotMinPeers)
+	relayOnly := crawlSnapshotPeer{id: genPeerID(t), addrs: []ma.Multiaddr{relay}}
+	sc, _, _ := newTestSnapshotCrawler(t, path, time.Hour, append(append([]crawlSnapshotPeer{}, public...), relayOnly))
+
+	sc.Run(context.Background(), nil, func(peer.ID, []*peer.AddrInfo) {}, func(peer.ID, error) {})
+
+	header, entries := readCrawlSnapshot(t, path)
+	require.Equal(t, len(public), header.Peers)
+	require.NotContains(t, entryIDs(entries), relayOnly.id, "a peer with only a relay address is not saved")
+
+	// And the same peer in a hand-written file is dropped on load rather than
+	// replayed into the peerstore for the filter to reject later.
+	loadPath := filepath.Join(t.TempDir(), "dht-crawl.ndjson")
+	writeCrawlSnapshot(t, loadPath, crawlSnapshotFormatVersion, time.Now(), append(append([]crawlSnapshotPeer{}, public...), relayOnly))
+	sc2, _, book := newTestSnapshotCrawler(t, loadPath, time.Hour, nil)
+	var replayed []peer.ID
+	var mu sync.Mutex
+	sc2.Run(context.Background(), nil, countingSuccess(&mu, &replayed), func(peer.ID, error) {})
+	require.Len(t, replayed, len(public))
+	require.Empty(t, book.Addrs(relayOnly.id), "a relay-only peer never reaches the peerstore")
 }
 
 func TestCrawlSnapshotColdStartCrawlsAndSaves(t *testing.T) {

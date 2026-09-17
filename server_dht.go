@@ -15,7 +15,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
-	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -93,11 +92,14 @@ var newDefaultCrawler = func(h host.Host) (crawler.Crawler, error) {
 // routing table stays empty.
 //
 // A replayed peer is therefore judged on the rest of what the default asks: a
-// public, non-relay address in the peerstore. The snapshot only ever holds
-// public addresses and the replay writes them back before reporting the peer,
-// so this accepts exactly the peers the file vouches for. Outside a replay the
-// filter is the upstream default, unchanged, so real crawls build the table
-// they always did.
+// public, non-relay address in the peerstore, which is publicDialableAddr - the
+// same predicate the snapshot saves and loads with, so this accepts exactly the
+// peers the file vouches for. See its comment for where it is more permissive
+// than the address test inside the default, which someguy cannot call because
+// kad-dht does not export it.
+//
+// Outside a replay the filter is the upstream default, unchanged, so real
+// crawls build the table they always did.
 func replayAwareRouteTableFilter(h host.Host, sc *snapshotCrawler) dht.RouteTableFilterFunc {
 	return func(d any, p peer.ID) bool {
 		if dht.PublicRoutingTableFilter(d, p) {
@@ -107,7 +109,7 @@ func replayAwareRouteTableFilter(h host.Host, sc *snapshotCrawler) dht.RouteTabl
 			return false
 		}
 		for _, a := range h.Peerstore().Addrs(p) {
-			if manet.IsPublicAddr(a) && !isRelayAddr(a) {
+			if publicDialableAddr(a) {
 				return true
 			}
 		}

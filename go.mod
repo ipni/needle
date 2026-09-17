@@ -162,11 +162,22 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-// The accelerated DHT client's FindPeer used to gate its answer on a dial of the
-// target and return ErrNotFound when that dial failed, discarding addresses the
-// network had just reported. The fork returns them, moves the dial to a bounded
-// background goroutine, and stops querying shortly after the first peer reports
-// the target. The same tag also adds fullrt.WithRouteTableFilter, which the DHT
-// crawl snapshot needs to keep a replayed routing table. Drop this replace once
-// the changes are upstream.
+// Someguy pins one fork tag carrying two fullrt changes.
+//
+// FindPeer: it used to gate its answer on a dial of the target and return
+// ErrNotFound when that dial failed, discarding addresses the network had just
+// reported. The fork returns them, moves the dial to a bounded background
+// goroutine, and stops querying shortly after the first peer reports the target.
+//
+// WithRouteTableFilter: the crawl snapshot replays a saved routing table into
+// fullrt by reporting its peers through the crawler interface. fullrt runs every
+// reported peer through a route table filter whose default keeps a peer only
+// while the host has an open connection to it - true of a peer a crawl just
+// dialled, never true of a replayed one - and upstream offers no way to supply a
+// different filter, so every replayed peer is dropped and the table comes up
+// empty. The fork lets the caller supply one.
+//
+// A replace rather than a pseudo-version because the fork keeps the upstream
+// module path, so go get cannot express the pin. Drop it once both changes are
+// upstream.
 replace github.com/libp2p/go-libp2p-kad-dht => github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2
