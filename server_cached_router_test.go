@@ -13,6 +13,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"sync"
+	"sync/atomic"
+	"testing/synctest"
 )
 
 type mockResultIter[T any] struct {
@@ -73,7 +76,7 @@ func TestCachedRouter(t *testing.T) {
 		cab.addrBook.AddAddrs(pid, []multiaddr.Multiaddr{publicAddr.Multiaddr}, time.Hour)
 
 		// Create cached router
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		it, err := cr.FindProviders(ctx, c, 10)
 		require.NoError(t, err)
@@ -105,7 +108,7 @@ func TestCachedRouter(t *testing.T) {
 		cab.addrBook.AddAddrs(pid, []multiaddr.Multiaddr{publicAddr.Multiaddr}, time.Hour)
 
 		// Create cached router
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		it, err := cr.FindPeers(ctx, pid, 10)
 		require.NoError(t, err)
@@ -140,7 +143,7 @@ func TestCachedRouter(t *testing.T) {
 
 		cab, err := newCachedAddrBook(WithAllowPrivateIPs())
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Drain FindProviders so the observed addrs get cached
 		provResults, err := cr.FindProviders(ctx, c, 10)
@@ -174,7 +177,7 @@ func TestCachedRouter(t *testing.T) {
 
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// The {unused, peers} series is written by exactly one line: the
 		// cache-first lookup passes nil addrs and can never hit it, and no other
@@ -208,7 +211,7 @@ func TestCachedRouter(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create cached router
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		_, err = cr.FindPeers(ctx, pid, 10)
 		require.ErrorIs(t, err, routing.ErrNotFound)
@@ -228,7 +231,7 @@ func TestCachedRouter(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create cached router
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		publicAddr := mustMultiaddr(t, "/ip4/137.21.14.12/tcp/4001")
 
@@ -275,7 +278,7 @@ func TestCachedRouter(t *testing.T) {
 		cab.addrBook.AddAddrs(pid, []multiaddr.Multiaddr{publicAddr.Multiaddr}, time.Hour)
 
 		// Create cached router
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		it, err := cr.GetClosestPeers(ctx, c)
 		require.NoError(t, err)
@@ -313,7 +316,7 @@ func TestCachedRouter(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create cached router
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		it, err := cr.GetClosestPeers(ctx, c)
 		require.NoError(t, err)
@@ -347,7 +350,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		mr := &mockRouter{}
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -378,7 +381,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
 		cab.addrBook.AddAddrs(pid, []multiaddr.Multiaddr{publicAddr.Multiaddr}, time.Hour)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -414,7 +417,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		// Create cached router with empty cache
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -440,7 +443,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		mr := &mockRouter{}
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -467,7 +470,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		mr := &mockRouter{}
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -510,7 +513,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		// Create cached router
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -538,7 +541,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		// Create cached router with empty cache
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -574,7 +577,7 @@ func TestCacheFallbackIter(t *testing.T) {
 		cab, err := newCachedAddrBook()
 		require.NoError(t, err)
 		cab.addrBook.AddAddrs(pid2, []multiaddr.Multiaddr{publicAddr.Multiaddr}, time.Hour)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		// Create fallback iterator
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, ctx, addrQueryOriginUnknown)
@@ -636,7 +639,7 @@ func TestFindPeerConcurrencyCap(t *testing.T) {
 		cab, err := newCachedAddrBook(WithMaxConcurrentFindPeers(1))
 		require.NoError(t, err)
 		require.True(t, cab.tryAcquireFindPeerSlot(), "occupy the only slot")
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, t.Context(), addrQueryOriginProviders)
 
@@ -669,7 +672,7 @@ func TestFindPeerConcurrencyCap(t *testing.T) {
 		mr.On("FindPeers", mock.Anything, pid, 1).Return(nil, routing.ErrNotFound)
 		cab, err := newCachedAddrBook(WithMaxConcurrentFindPeers(4))
 		require.NoError(t, err)
-		cr := NewCachedRouter(mr, cab)
+		cr := NewCachedRouter(mr, cab, 0)
 
 		fallbackIter := NewCacheFallbackIter(sourceIter, cr, t.Context(), addrQueryOriginProviders)
 		_, err = iter.ReadAllResults(fallbackIter)
@@ -678,4 +681,175 @@ func TestFindPeerConcurrencyCap(t *testing.T) {
 		require.Eventually(t, func() bool { return len(cab.findPeerSlots) == 0 }, 5*time.Second, 10*time.Millisecond,
 			"every dispatched lookup must release its slot")
 	})
+}
+
+// negativeCounter reads the peer_addr_lookups counter for one cache state, so a
+// test can assert on the delta rather than an absolute across the package's
+// shared registry.
+func negativeCounter(t *testing.T) float64 {
+	t.Helper()
+	return testutil.ToFloat64(peerAddrLookups.WithLabelValues(addrCacheStateNegative, addrQueryOriginPeers))
+}
+
+// TestFindPeersSingleflight: concurrent FindPeers for one peer ID collapse into
+// a single call to the inner router, and every caller still gets the records.
+func TestFindPeersSingleflight(t *testing.T) {
+	ctx := context.Background()
+	pid := peer.ID("test-peer-singleflight")
+	addr := mustMultiaddr(t, "/ip4/137.21.14.12/tcp/4001")
+
+	var calls atomic.Int32
+	release := make(chan struct{})
+	mr := &blockingPeersRouter{
+		calls:   &calls,
+		release: release,
+		rec:     &types.PeerRecord{Schema: types.SchemaPeer, ID: &pid, Addrs: []types.Multiaddr{addr}},
+	}
+
+	cab, err := newCachedAddrBook()
+	require.NoError(t, err)
+	cr := NewCachedRouter(mr, cab, 0)
+
+	const n = 2
+	var wg sync.WaitGroup
+	results := make([]int, n)
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			it, err := cr.FindPeers(ctx, pid, 10)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			recs, err := iter.ReadAllResults(it)
+			errs[i] = err
+			results[i] = len(recs)
+		}()
+	}
+	// Let both goroutines reach the inner router before it returns, so the
+	// second genuinely joins the first rather than following it.
+	require.Eventually(t, func() bool { return mr.waiting() >= 1 }, 5*time.Second, time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	require.EqualValues(t, 1, calls.Load(), "concurrent FindPeers must reach the inner router once")
+	for i := range n {
+		require.NoError(t, errs[i])
+		require.Equal(t, 1, results[i], "caller %d got no records", i)
+	}
+}
+
+// blockingPeersRouter holds FindPeers open until released, so a test can get two
+// callers in flight at once.
+type blockingPeersRouter struct {
+	router
+	calls    *atomic.Int32
+	release  chan struct{}
+	rec      *types.PeerRecord
+	inFlight atomic.Int32
+}
+
+func (m *blockingPeersRouter) waiting() int32 { return m.inFlight.Load() }
+
+func (m *blockingPeersRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
+	m.calls.Add(1)
+	m.inFlight.Add(1)
+	defer m.inFlight.Add(-1)
+	<-m.release
+	return iter.ToResultIter(iter.FromSlice([]*types.PeerRecord{m.rec})), nil
+}
+
+// TestFindPeersNegativeCache covers the three TTL behaviours in one synctest
+// bubble each: within the TTL the inner router is never reached and the negative
+// counter moves; with TTL 0 every request reaches it; after the TTL expires the
+// next request reaches it again.
+func TestFindPeersNegativeCache(t *testing.T) {
+	// The router is built outside the synctest bubble on purpose: the address
+	// book's peerstore starts a background goroutine with no shutdown, and a
+	// bubble will not exit while a goroutine it owns is still parked. Both the
+	// write of lastFailedConnTime and the time.Since that reads it happen inside
+	// the bubble, so they share its fake clock regardless.
+	newRouter := func(t *testing.T, ttl time.Duration, calls *atomic.Int32) cachedRouter {
+		t.Helper()
+		mr := &notFoundPeersRouter{calls: calls}
+		cab, err := newCachedAddrBook()
+		require.NoError(t, err)
+		return NewCachedRouter(mr, cab, ttl)
+	}
+
+	t.Run("within TTL never reaches the inner router", func(t *testing.T) {
+		var calls atomic.Int32
+		cr := newRouter(t, time.Hour, &calls)
+		synctest.Test(t, func(t *testing.T) {
+			before := negativeCounter(t)
+
+			// First request misses the negative cache, reaches the DHT, and
+			// records the failure.
+			_, err := cr.FindPeers(context.Background(), peer.ID("np"), 10)
+			require.ErrorIs(t, err, routing.ErrNotFound)
+			require.EqualValues(t, 1, calls.Load())
+			require.Equal(t, before, negativeCounter(t), "the first request is not a negative hit")
+
+			// Subsequent ones are answered from the recorded failure.
+			for range 3 {
+				_, err = cr.FindPeers(context.Background(), peer.ID("np"), 10)
+				require.ErrorIs(t, err, routing.ErrNotFound)
+			}
+			require.EqualValues(t, 1, calls.Load(), "within the TTL the inner router must not be reached again")
+			require.Equal(t, before+3, negativeCounter(t), "each suppressed lookup counts one negative hit")
+		})
+	})
+
+	t.Run("TTL 0 reaches the inner router every time", func(t *testing.T) {
+		var calls atomic.Int32
+		cr := newRouter(t, 0, &calls)
+		synctest.Test(t, func(t *testing.T) {
+			before := negativeCounter(t)
+			for range 3 {
+				_, err := cr.FindPeers(context.Background(), peer.ID("np0"), 10)
+				require.ErrorIs(t, err, routing.ErrNotFound)
+			}
+			require.EqualValues(t, 3, calls.Load(), "a zero TTL disables the negative cache")
+			require.Equal(t, before, negativeCounter(t), "a zero TTL records no negative hits")
+		})
+	})
+
+	t.Run("after the TTL expires it reaches the inner router again", func(t *testing.T) {
+		var calls atomic.Int32
+		cr := newRouter(t, time.Minute, &calls)
+		synctest.Test(t, func(t *testing.T) {
+
+			_, err := cr.FindPeers(context.Background(), peer.ID("npx"), 10)
+			require.ErrorIs(t, err, routing.ErrNotFound)
+			require.EqualValues(t, 1, calls.Load())
+
+			// Still inside the window.
+			time.Sleep(30 * time.Second)
+			synctest.Wait()
+			_, err = cr.FindPeers(context.Background(), peer.ID("npx"), 10)
+			require.ErrorIs(t, err, routing.ErrNotFound)
+			require.EqualValues(t, 1, calls.Load(), "still within the TTL")
+
+			// Past it.
+			time.Sleep(31 * time.Second)
+			synctest.Wait()
+			_, err = cr.FindPeers(context.Background(), peer.ID("npx"), 10)
+			require.ErrorIs(t, err, routing.ErrNotFound)
+			require.EqualValues(t, 2, calls.Load(), "past the TTL the lookup must go out again")
+		})
+	})
+}
+
+// notFoundPeersRouter always answers ErrNotFound and counts how often it is asked.
+type notFoundPeersRouter struct {
+	router
+	calls *atomic.Int32
+}
+
+func (m *notFoundPeersRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
+	m.calls.Add(1)
+	return nil, routing.ErrNotFound
 }

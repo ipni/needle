@@ -69,6 +69,12 @@ func main() {
 						Usage:       "maximum background FindPeer lookups running at once for provider records that arrive without addresses",
 					},
 					&cli.DurationFlag{
+						Name:    "cached-addr-book-negative-ttl",
+						Value:   0,
+						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL"},
+						Usage:   "how long a failed peer lookup suppresses further DHT lookups for that peer, answering /routing/v1/peers as not-found from the recorded failure; 0 disables",
+					},
+					&cli.DurationFlag{
 						Name:    "cached-addr-book-snapshot-interval",
 						Value:   0,
 						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL"},
@@ -242,6 +248,10 @@ func main() {
 					if err != nil {
 						return err
 					}
+					negativeTTL := ctx.Duration("cached-addr-book-negative-ttl")
+					if negativeTTL < 0 {
+						return fmt.Errorf("cached-addr-book-negative-ttl must be non-negative, got %s (0 disables)", negativeTTL)
+					}
 					snapshotPath, snapshotInterval, err := snapshotFlagConfig(ctx.String("datadir"), ctx.Bool("cached-addr-book"), ctx.String("dht"), ctx.Duration("cached-addr-book-snapshot-interval"))
 					if err != nil {
 						return err
@@ -255,6 +265,7 @@ func main() {
 						cachedAddrBookMaxFindPeers:     ctx.Int("cached-addr-book-max-concurrent-find-peers"),
 						cachedAddrBookSnapshotPath:     snapshotPath,
 						cachedAddrBookSnapshotInterval: snapshotInterval,
+						cachedAddrBookNegativeTTL:      negativeTTL,
 						routingTimeout:                 ctx.Duration("routing-timeout"),
 						dnsAddrResolution:              dnsAddrResolution,
 						recordsLimit:                   recordsLimit,
@@ -291,6 +302,9 @@ func main() {
 					fmt.Printf("SOMEGUY_DHT = %s\n", cfg.dhtType)
 					if cfg.cachedAddrBookSnapshotInterval > 0 {
 						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL = %s\n", cfg.cachedAddrBookSnapshotInterval)
+					}
+					if cfg.cachedAddrBookNegativeTTL > 0 {
+						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL = %s\n", cfg.cachedAddrBookNegativeTTL)
 					}
 					if cfg.pprof {
 						fmt.Printf("SOMEGUY_PPROF = true\n")

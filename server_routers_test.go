@@ -1085,8 +1085,8 @@ func TestRouterName(t *testing.T) {
 	// turn up by mistake.
 	dht := libp2pRouter{}
 	require.Equal(t, "dht", routerName(sanitizeRouter{dht}))
-	require.Equal(t, "dht", routerName(sanitizeRouter{NewCachedRouter(dht, nil)}))
-	require.Equal(t, "dht", routerName(dnsAddrRouter{router: sanitizeRouter{NewCachedRouter(dht, nil)}}))
+	require.Equal(t, "dht", routerName(sanitizeRouter{NewCachedRouter(dht, nil, 0)}))
+	require.Equal(t, "dht", routerName(dnsAddrRouter{router: sanitizeRouter{NewCachedRouter(dht, nil, 0)}}))
 	require.Equal(t, "delegated:cid.contact", routerName(clientRouter{name: "cid.contact"}))
 
 	// additionalRouters (the HTTP block providers) and anything unrecognised.

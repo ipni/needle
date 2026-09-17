@@ -118,6 +118,7 @@ type config struct {
 	cachedAddrBookMaxFindPeers     int
 	cachedAddrBookSnapshotPath     string
 	cachedAddrBookSnapshotInterval time.Duration
+	cachedAddrBookNegativeTTL      time.Duration
 	routingTimeout                 time.Duration
 	dnsAddrResolution              DNSAddrResolution
 	recordsLimit                   int
@@ -309,14 +310,14 @@ func start(ctx context.Context, cfg *config) error {
 		fmt.Printf("Resolving /dnsaddr provider addresses: %s\n", cfg.dnsAddrResolution)
 	}
 
-	crRouters := combineRouters(h, dhtRouting, cachedAddrBook, providerHTTPRouters, blockProviderRouters, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace)
-	prRouters := combineRouters(h, dhtRouting, cachedAddrBook, peerHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace)
-	ipnsRouters := combineRouters(h, dhtRouting, cachedAddrBook, ipnsHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace)
+	crRouters := combineRouters(h, dhtRouting, cachedAddrBook, providerHTTPRouters, blockProviderRouters, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL)
+	prRouters := combineRouters(h, dhtRouting, cachedAddrBook, peerHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL)
+	ipnsRouters := combineRouters(h, dhtRouting, cachedAddrBook, ipnsHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL)
 
 	// Create DHT router for GetClosestPeers endpoint
 	var dhtRouters router
 	if cachedAddrBook != nil && dhtRouting != nil {
-		cachedRouter := NewCachedRouter(libp2pRouter{host: h, routing: dhtRouting}, cachedAddrBook)
+		cachedRouter := NewCachedRouter(libp2pRouter{host: h, routing: dhtRouting}, cachedAddrBook, cfg.cachedAddrBookNegativeTTL)
 		dhtRouters = sanitizeRouter{cachedRouter}
 	} else if dhtRouting != nil {
 		dhtRouters = sanitizeRouter{libp2pRouter{host: h, routing: dhtRouting}}
@@ -489,11 +490,11 @@ func newHost(cfg *config) (host.Host, error) {
 
 // combineRouters combines delegated HTTP routers with DHT and additional routers.
 // It no longer creates HTTP clients (that's done in createDelegatedHTTPRouters).
-func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddrBook, delegatedRouters, additionalRouters []router, dnsAddr *dnsAddrResolver, dnsAddrMode DNSAddrResolution, routerTrace bool) router {
+func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddrBook, delegatedRouters, additionalRouters []router, dnsAddr *dnsAddrResolver, dnsAddrMode DNSAddrResolution, routerTrace bool, negativeTTL time.Duration) router {
 	var dhtRouter router
 
 	if cachedAddrBook != nil {
-		cachedRouter := NewCachedRouter(libp2pRouter{host: h, routing: dht}, cachedAddrBook)
+		cachedRouter := NewCachedRouter(libp2pRouter{host: h, routing: dht}, cachedAddrBook, negativeTTL)
 		dhtRouter = sanitizeRouter{cachedRouter}
 	} else if dht != nil {
 		dhtRouter = sanitizeRouter{libp2pRouter{host: h, routing: dht}}

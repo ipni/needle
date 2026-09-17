@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -64,11 +65,14 @@ var (
 )
 
 const (
-	// cache=unused|hit|miss, indicates how effective cache is
-	addrCacheStateLabel  = "cache"
-	addrCacheStateUnused = "unused"
-	addrCacheStateHit    = "hit"
-	addrCacheStateMiss   = "miss"
+	// cache=unused|hit|miss|negative, indicates how effective cache is.
+	// negative is a FindPeers request answered as not-found from the recorded
+	// failure of an earlier lookup, without going to the DHT at all.
+	addrCacheStateLabel    = "cache"
+	addrCacheStateUnused   = "unused"
+	addrCacheStateHit      = "hit"
+	addrCacheStateMiss     = "miss"
+	addrCacheStateNegative = "negative"
 
 	// source=providers|peers|closest indicates if query originated from provider, peer, or closest peers endpoint
 	addrQueryOriginLabel        = "origin"
@@ -85,10 +89,22 @@ const (
 type cachedRouter struct {
 	router
 	cachedAddrBook *cachedAddrBook
+	// negativeTTL is how long a recorded connection failure suppresses further
+	// DHT lookups for that peer. Zero disables the negative cache.
+	negativeTTL time.Duration
+	// findPeerGroup collapses concurrent FindPeers for one peer ID into a
+	// single call to the underlying router. It is a pointer because
+	// cachedRouter is copied by value and a singleflight.Group must not be.
+	findPeerGroup *singleflight.Group
 }
 
-func NewCachedRouter(router router, cab *cachedAddrBook) cachedRouter {
-	return cachedRouter{router, cab}
+func NewCachedRouter(router router, cab *cachedAddrBook, negativeTTL time.Duration) cachedRouter {
+	return cachedRouter{
+		router:         router,
+		cachedAddrBook: cab,
+		negativeTTL:    negativeTTL,
+		findPeerGroup:  &singleflight.Group{},
+	}
 }
 
 func (r cachedRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
@@ -117,32 +133,67 @@ func (r cachedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (it
 		return iter.ToResultIter(iter.FromSlice([]*types.PeerRecord{rec})), nil
 	}
 
-	// Cache miss: fall back to the underlying peer routing (DHT).
-	it, err := r.router.FindPeers(ctx, pid, limit)
-
-	if err == routing.ErrNotFound {
-		// Record the failure used for probing/backoff purposes.
-		r.cachedAddrBook.RecordFailedConnection(pid)
-		return nil, routing.ErrNotFound
+	// Negative cache: a peer we recently failed to find is overwhelmingly
+	// likely to still be missing, and the DHT walk for a peer nobody reports
+	// costs the full query timeout. Answer not-found from the recorded failure
+	// instead. Disabled when negativeTTL is 0.
+	if r.negativeTTL > 0 && r.cachedAddrBook != nil {
+		if pState, ok := r.cachedAddrBook.peerCache.Peek(pid); ok &&
+			!pState.lastFailedConnTime.IsZero() &&
+			time.Since(pState.lastFailedConnTime) < r.negativeTTL {
+			peerAddrLookups.WithLabelValues(addrCacheStateNegative, addrQueryOriginPeers).Inc()
+			return nil, routing.ErrNotFound
+		}
 	}
 
+	// Cache miss: fall back to the underlying peer routing (DHT), collapsing
+	// concurrent requests for the same peer into one. A popular missing peer
+	// otherwise starts one full-timeout DHT walk per in-flight request, all of
+	// which do the same work and reach the same answer.
+	//
+	// The shared call drains the iterator to a slice so every waiter gets its
+	// own iterator over the same records; a ResultIter can only be consumed
+	// once. Note that the shared call runs under the first caller's context,
+	// so if that caller goes away the waiters see its cancellation - the usual
+	// singleflight trade-off, and acceptable here because the alternative is
+	// the duplicate DHT walks this exists to remove.
+	v, err, _ := r.findPeerGroup.Do(pid.String(), func() (any, error) {
+		it, err := r.router.FindPeers(ctx, pid, limit)
+		if err == routing.ErrNotFound {
+			// Record the failure used for probing/backoff purposes, and which
+			// the negative cache above reads on the next request.
+			r.cachedAddrBook.RecordFailedConnection(pid)
+			return nil, routing.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		recs, err := iter.ReadAllResults(it)
+		if err != nil {
+			return nil, err
+		}
+
+		// Enrich records that came back without addresses from the peerbook.
+		// Read the cache directly rather than via withAddrsFromCache: FindPeers
+		// already recorded this request's outcome through the cache-first lookup
+		// above, so recording here would double-count peer_addr_lookups.
+		for _, rec := range recs {
+			if rec == nil || rec.ID == nil {
+				continue
+			}
+			if len(rec.Addrs) == 0 {
+				rec.Addrs = r.cachedAddrBook.GetCachedAddrs(*rec.ID)
+			}
+		}
+		return recs, nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Enrich records that came back without addresses from the peerbook.
-	// Read the cache directly rather than via withAddrsFromCache: FindPeers
-	// already recorded this request's outcome through the cache-first lookup
-	// above, so recording here would double-count peer_addr_lookups.
-	return iter.Map(it, func(v iter.Result[*types.PeerRecord]) iter.Result[*types.PeerRecord] {
-		if v.Err != nil || v.Val == nil || v.Val.ID == nil {
-			return v
-		}
-		if len(v.Val.Addrs) == 0 {
-			v.Val.Addrs = r.cachedAddrBook.GetCachedAddrs(*v.Val.ID)
-		}
-		return v
-	}), nil
+	recs, _ := v.([]*types.PeerRecord)
+	return iter.ToResultIter(iter.FromSlice(recs)), nil
 }
 
 func (r cachedRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {

@@ -10,6 +10,7 @@ The environment variables below override `someguy`'s built-in defaults.
   - [`SOMEGUY_CACHED_ADDR_BOOK_ACTIVE_PROBING`](#someguy_cached_addr_book_active_probing)
   - [`SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS`](#someguy_cached_addr_book_max_concurrent_find_peers)
   - [`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`](#someguy_cached_addr_book_snapshot_interval)
+  - [`SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL`](#someguy_cached_addr_book_negative_ttl)
   - [`SOMEGUY_DNSADDR_RESOLUTION`](#someguy_dnsaddr_resolution)
   - [`SOMEGUY_ROUTING_TIMEOUT`](#someguy_routing_timeout)
   - [`SOMEGUY_RECORDS_LIMIT`](#someguy_records_limit)
@@ -91,6 +92,20 @@ The snapshot holds the addresses with their TTLs, reconstructed from the time ea
 The periodic write is the guarantee: a clean shutdown writes one more time, but an OOM kill skips shutdown, so the interval bounds how stale a restart can be.
 
 Requires `SOMEGUY_DATADIR`, because the snapshot is written to `<datadir>/cached-addr-book.ndjson`. Someguy refuses to start if this is set while `SOMEGUY_CACHED_ADDR_BOOK` is disabled or `SOMEGUY_DHT` is `disabled`, since the snapshot could never be written. Watch the saves and the restore with the `someguy_cached_addr_book_snapshot_*` metrics in [metrics.md](metrics.md) and [peer-address-caching.md](peer-address-caching.md).
+
+Default: `0` (disabled)
+
+### `SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL`
+
+How long a failed peer lookup suppresses further DHT lookups for that peer. Within the TTL, `/routing/v1/peers/{peer-id}` is answered as not-found straight from the failure recorded by the previous lookup, without a DHT query.
+
+A DHT lookup for a peer nobody reports costs the full query timeout, and the same absent peers are requested repeatedly, so those requests dominate the slow tail of the peers endpoint while telling us nothing new. This trades freshness for that latency: a peer that comes back online within the TTL keeps being reported as not-found until the TTL lapses.
+
+The failure it reads is the same one that drives probe backoff, recorded by `RecordFailedConnection`, so a peer that someguy successfully connects to has the record cleared and is not suppressed. Suppressed requests are counted as `someguy_cached_router_peer_addr_lookups{cache="negative"}` in [metrics.md](metrics.md); compare that against the `miss` series to see how much of the peers traffic it is absorbing.
+
+Independently of this setting, concurrent `/routing/v1/peers` requests for the same peer ID are collapsed into a single DHT lookup, so a popular missing peer does not start one full-timeout walk per in-flight request.
+
+Applies only when `SOMEGUY_CACHED_ADDR_BOOK` is enabled.
 
 Default: `0` (disabled)
 
