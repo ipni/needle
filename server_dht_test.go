@@ -451,6 +451,15 @@ func (f *fakeInnerCrawler) lastStarting() []*peer.AddrInfo {
 	return f.starting[len(f.starting)-1]
 }
 
+// pollReadyFast shortens the readiness gauge's sampling interval, so a test
+// asserting on the gauge does not wait a production interval for it.
+func pollReadyFast(t *testing.T) {
+	t.Helper()
+	prev := acceleratedReadyPollInterval
+	acceleratedReadyPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { acceleratedReadyPollInterval = prev })
+}
+
 // useFakeInnerCrawler swaps the crawler newBundledDHT builds for a fake, for
 // the duration of the test.
 func useFakeInnerCrawler(t *testing.T, fake *fakeInnerCrawler) {
@@ -482,6 +491,7 @@ func TestCrawlSnapshotReplayMakesFullRTReady(t *testing.T) {
 	release := make(chan struct{})
 	fake := &fakeInnerCrawler{report: func(crawler.HandleQueryResult) { <-release }}
 	useFakeInnerCrawler(t, fake)
+	pollReadyFast(t)
 
 	h, err := libp2p.New(libp2p.NoListenAddrs)
 	require.NoError(t, err)
@@ -500,6 +510,8 @@ func TestCrawlSnapshotReplayMakesFullRTReady(t *testing.T) {
 	require.True(t, b.crawlSnapshot.Replayed())
 	require.Equal(t, float64(len(saved)), testutil.ToFloat64(crawlSnapshotRestoredPeers))
 	require.Len(t, b.fullRT.Stat(), len(saved))
+	require.Eventually(t, func() bool { return testutil.ToFloat64(acceleratedReady) == 1 }, 10*time.Second, 20*time.Millisecond,
+		"the readiness gauge is what a rollout gates on, so it must follow the replay")
 
 	// Nothing was dialled to get there, and the addresses are where the crawl
 	// that follows looks for them.
@@ -550,6 +562,7 @@ func TestCrawlSnapshotRealCrawlKeepsUpstreamFilter(t *testing.T) {
 func TestCrawlSnapshotDisabledUsesDefaultCrawler(t *testing.T) {
 	fake := &fakeInnerCrawler{}
 	useFakeInnerCrawler(t, fake)
+	pollReadyFast(t)
 
 	h, err := libp2p.New(libp2p.NoListenAddrs)
 	require.NoError(t, err)
@@ -560,6 +573,9 @@ func TestCrawlSnapshotDisabledUsesDefaultCrawler(t *testing.T) {
 	t.Cleanup(func() { b.Close() })
 
 	require.Nil(t, b.crawlSnapshot, "no wrapper when the snapshot is disabled")
-	require.Nil(t, b.cancel, "no refresh goroutine when the snapshot is disabled")
 	require.Zero(t, fake.runCount(), "fullrt builds its own crawler when the snapshot is disabled")
+	// The gauge is process-global, so wait for this client's poller to report
+	// on it rather than reading whatever an earlier test left behind.
+	require.Eventually(t, func() bool { return testutil.ToFloat64(acceleratedReady) == 0 }, 10*time.Second, 20*time.Millisecond,
+		"nothing has crawled, so the accelerated client is not ready")
 }

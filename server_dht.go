@@ -16,6 +16,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type bundledDHT struct {
@@ -23,7 +25,9 @@ type bundledDHT struct {
 	fullRT   *fullrt.FullRT
 
 	// crawlSnapshot is nil unless the crawl snapshot is enabled. cancel and wg
-	// belong to the goroutine that triggers the refresh after a replay.
+	// belong to the background goroutines: the readiness poller, which always
+	// runs, and the refresh after a replay, which runs only with the snapshot
+	// enabled.
 	crawlSnapshot *snapshotCrawler
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
@@ -41,6 +45,31 @@ const (
 	// not gate the answer.
 	DefaultFindPeerDialTimeout = 5 * time.Second
 )
+
+// dhtSubsystem is the metric subsystem for the DHT clients themselves, as
+// opposed to dht_crawl, which covers the crawl and its snapshot.
+const dhtSubsystem = "dht"
+
+// acceleratedReadyPollInterval is how often the accelerated client's readiness
+// is sampled for the gauge below. Ready() is two read-locked length checks, so
+// this is cheap; the interval only bounds how stale the gauge can be, and it
+// has to be well under the time a rollout waits for a restarted instance.
+//
+// It is a variable only so tests do not have to wait a full interval for the
+// gauge to catch up; nothing in production reassigns it.
+var acceleratedReadyPollInterval = 10 * time.Second
+
+// acceleratedReady is the only signal that the accelerated client is actually
+// answering. The crawl snapshot's restored_peers gauge is not: it counts what
+// the replay reported, before fullrt's route table filter decides what to keep,
+// so it reads non-zero even in the case where every replayed peer is dropped
+// and the table is empty. Anything gating on a warm restart has to read this.
+var acceleratedReady = promauto.NewGauge(prometheus.GaugeOpts{
+	Name:      "accelerated_ready",
+	Namespace: name,
+	Subsystem: dhtSubsystem,
+	Help:      "1 when the accelerated DHT client's routing table is fresh enough to serve lookups, 0 while requests fall back to the standard client",
+})
 
 // newDefaultCrawler builds the crawler fullrt would have built for itself.
 // Supplying fullrt.WithCrawler replaces that default, so the snapshot wrapper
@@ -137,11 +166,32 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrac
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	b := &bundledDHT{
 		standard:      standardDHT,
 		fullRT:        fullRT,
 		crawlSnapshot: crawlSnapshot,
+		cancel:        cancel,
 	}
+
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		t := time.NewTicker(acceleratedReadyPollInterval)
+		defer t.Stop()
+		for {
+			if fullRT.Ready() {
+				acceleratedReady.Set(1)
+			} else {
+				acceleratedReady.Set(0)
+			}
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	if crawlSnapshot != nil {
 		// A replayed table is as stale as the last completed crawl plus the
@@ -150,8 +200,6 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrac
 		// crawls, so it blocks until the replayed table is installed and then
 		// starts a crawl seeded with the replayed peers: Ready first, then
 		// refresh.
-		ctx, cancel := context.WithCancel(context.Background())
-		b.cancel = cancel
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
@@ -179,12 +227,11 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrac
 // them no longer shuts them down and Close is the only way to stop their
 // long-lived goroutines.
 func (b *bundledDHT) Close() error {
-	if b.cancel != nil {
-		// Stop the post-replay refresh first: it can be blocked sending a
-		// trigger fullrt will never read once it is closed.
-		b.cancel()
-		b.wg.Wait()
-	}
+	// Stop the readiness poller and the post-replay refresh first: the latter
+	// can be blocked sending a trigger fullrt will never read once it is
+	// closed.
+	b.cancel()
+	b.wg.Wait()
 	return errors.Join(b.fullRT.Close(), b.standard.Close())
 }
 

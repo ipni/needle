@@ -34,6 +34,16 @@ When Someguy aggregates other `/routing/v1` endpoints, `boxo/routing/http/client
 
 The five snapshot gauges read `0` while the address book snapshot is disabled (`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL` at `0`). The errors counter has no `_total` suffix (matching `probed_peers`), and each of its `op` series only appears after the first error of that kind, so alerts must handle the absent series.
 
+### Accelerated DHT client
+
+- `someguy_dht_accelerated_ready`: gauge, `1` when the accelerated client's routing table is fresh enough to serve lookups, `0` while requests fall back to the standard client. Sampled every 10 seconds, so it lags reality by up to that long
+
+This is the only metric that says the accelerated client is actually answering,
+and it is the one to gate a rollout on. In particular
+`someguy_dht_crawl_snapshot_restored_peers` below is not: it counts what a
+snapshot replay reported, before the routing table filter decides what to keep,
+so it can read non-zero while the table is empty.
+
 ### Accelerated DHT crawl
 
 The accelerated client builds its routing table by crawling, and with
