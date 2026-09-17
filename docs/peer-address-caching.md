@@ -238,7 +238,7 @@ pays a fresh DHT walk every time.
 The exception is an optional, off-by-default snapshot of the cached address
 book, written to `<datadir>/cached-addr-book.ndjson` on an interval and again
 on a clean shutdown, and restored before someguy serves its first request. It
-is a snapshot rather than a datastore-backed peerstore: psstoreds is
+is a snapshot rather than a datastore-backed peerstore: pstoreds is
 deprecated, it adds a datastore write per address update, and its
 `PeersWithAddrs` scans the whole store on every probe tick, while the snapshot
 writes one file on a timer and reads nothing in the hot path. The snapshot

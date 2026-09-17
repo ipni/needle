@@ -1,26 +1,3 @@
-// An optional, off-by-default on-disk snapshot of the cached address book, so
-// a restart does not start cold.
-//
-// We snapshot instead of backing the address book with go-libp2p's
-// datastore-backed peerstore (pstoreds): it is deprecated, it writes a record
-// to the datastore on every AddAddrs, and its PeersWithAddrs does a full
-// datastore scan, which the probe loop triggers every ProbeInterval. A
-// snapshot writes one file on a timer and on shutdown, and reads nothing in
-// the hot path.
-//
-// pstoremem exposes no per-address expiry: Addrs returns bare multiaddrs and
-// the expiring entry is unexported. The snapshot therefore cannot record each
-// address's remaining TTL, so restore reconstructs TTLs from
-// peerState.lastAddrWrite, the time the peer's addrs were last written.
-//
-// Reconstructing from a single per-peer write time over-extends the TTL of
-// addrs written earlier than that: CacheAddrs union-adds addrs (AddAddrs only
-// ever extends a TTL), so a peer's set can hold addrs from several write
-// times, and all of them are re-anchored to the last one. The over-extension
-// is bounded by the TTL itself, because any addr older than its TTL is already
-// gone from Addrs at snapshot time, and the probe loop re-confirms or evicts
-// each addr regardless, so the skew ages out quickly.
-
 package main
 
 import (
@@ -42,6 +19,29 @@ import (
 // snapshotFormatVersion is the version written in every snapshot's header
 // line. Bump it when the on-disk format changes in a way restore must handle
 // differently; restore rejects versions it does not understand.
+//
+// The snapshot itself is an optional, off-by-default on-disk copy of the
+// cached address book, so a restart does not start cold.
+//
+// We snapshot instead of backing the address book with go-libp2p's
+// datastore-backed peerstore (pstoreds): it is deprecated, it writes a record
+// to the datastore on every AddAddrs, and its PeersWithAddrs does a full
+// datastore scan, which the probe loop triggers every ProbeInterval. A
+// snapshot writes one file on a timer and on shutdown, and reads nothing in
+// the hot path.
+//
+// pstoremem exposes no per-address expiry: Addrs returns bare multiaddrs and
+// the expiring entry is unexported. The snapshot therefore cannot record each
+// address's remaining TTL, so restore reconstructs TTLs from
+// peerState.lastAddrWrite, the time the peer's addrs were last written.
+//
+// Reconstructing from a single per-peer write time over-extends the TTL of
+// addrs written earlier than that: CacheAddrs union-adds addrs (AddAddrs only
+// ever extends a TTL), so a peer's set can hold addrs from several write
+// times, and all of them are re-anchored to the last one. The over-extension
+// is bounded by the TTL itself, because any addr older than its TTL is already
+// gone from Addrs at snapshot time, and the probe loop re-confirms or evicts
+// each addr regardless, so the skew ages out quickly.
 const snapshotFormatVersion = 1
 
 const (
@@ -172,22 +172,6 @@ func (cab *cachedAddrBook) saveSnapshot(connected func(peer.ID) bool) error {
 	return cab.saveSnapshotLocked(connected)
 }
 
-// saveSnapshotIfFree saves the snapshot without waiting for the lock: a
-// caller on a shutdown deadline skips rather than blocks behind a periodic
-// save, which has already produced a recent snapshot. It reports whether a
-// save ran; err is nil when no save ran.
-func (cab *cachedAddrBook) saveSnapshotIfFree(connected func(peer.ID) bool) (bool, error) {
-	if cab.snapshotPath == "" {
-		return false, nil
-	}
-	if !cab.snapshotMu.TryLock() {
-		return false, nil
-	}
-	defer cab.snapshotMu.Unlock()
-	err := cab.saveSnapshotLocked(connected)
-	return err == nil, err
-}
-
 // saveSnapshotLocked runs the snapshot save and updates the snapshot metrics.
 // Callers must hold snapshotMu. It does not check that the snapshot is
 // enabled: it relies on the invariant that WithSnapshot is the sole setter
@@ -239,6 +223,8 @@ func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err
 		isConnected := connected(p)
 		written := state.lastAddrWrite
 		if isConnected {
+			// A connected peer's addrs are live now, so they are stamped with
+			// the snapshot time rather than their last write.
 			written = start
 		}
 
@@ -251,12 +237,12 @@ func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err
 			Failures:  state.connectFailures,
 		}
 
-		// Emit addrs only when their TTLs can be reconstructed: a connected
-		// peer's addrs are live, and a peer with a recorded write time can
-		// have its TTLs rebuilt from it. A disconnected peer with no write
-		// time (e.g. evicted from peerCache) would restore addrs with no TTL,
-		// so keep only its state.
-		if isConnected || !written.IsZero() {
+		// Emit addrs only when their TTLs can be reconstructed. A peer with a
+		// recorded write time can have its TTLs rebuilt from it, and a
+		// connected peer always has one because it was just stamped above. A
+		// disconnected peer with no write time (e.g. evicted from peerCache)
+		// would restore addrs with no TTL, so keep only its state.
+		if !written.IsZero() {
 			addrs := cab.addrBook.Addrs(p)
 			strs := make([]string, 0, len(addrs))
 			for _, a := range addrs {
@@ -323,12 +309,15 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 	sweepOrphanedSnapshotTemps(cab.snapshotPath)
 
 	defer func() {
-		if err != nil {
-			snapshotErrorsCounter.WithLabelValues(snapshotOpLoad).Inc()
-			return
-		}
+		// The gauges describe what the book actually holds, so they are set
+		// on the error path too: a scanner error (e.g. a line over the token
+		// limit) leaves every entry read before it applied, and reporting
+		// zero for those would understate the book.
 		snapshotRestoredPeers.Set(float64(peers))
 		snapshotRestoredAddrs.Set(float64(addrs))
+		if err != nil {
+			snapshotErrorsCounter.WithLabelValues(snapshotOpLoad).Inc()
+		}
 	}()
 
 	f, err := os.Open(cab.snapshotPath)
@@ -391,6 +380,12 @@ func (cab *cachedAddrBook) loadSnapshot() (peers, addrs int, err error) {
 			continue // no write time, so the addrs' TTLs cannot be reconstructed
 		}
 		age := now.Sub(entry.Written)
+		// A Written in the future - clock skew, or a snapshot copied from
+		// another box - would otherwise extend TTLs past their configured
+		// maximum.
+		if age < 0 {
+			age = 0
+		}
 
 		parsed := make([]ma.Multiaddr, 0, len(entry.Addrs))
 		for _, s := range entry.Addrs {

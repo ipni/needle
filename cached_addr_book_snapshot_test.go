@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ipfs/boxo/routing/http/types"
@@ -16,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	ma "github.com/multiformats/go-multiaddr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -241,24 +246,6 @@ func TestSaveSnapshotConcurrentCallsBothComplete(t *testing.T) {
 	require.Equal(t, []string{"cached-addr-book.ndjson"}, names)
 }
 
-func TestSaveSnapshotIfFreeSkipsWhenLocked(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cached-addr-book.ndjson")
-
-	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
-	require.NoError(t, err)
-
-	cab.snapshotMu.Lock()
-	saved, err := cab.saveSnapshotIfFree(func(peer.ID) bool { return false })
-	cab.snapshotMu.Unlock()
-	require.NoError(t, err)
-	require.False(t, saved)
-
-	saved, err = cab.saveSnapshotIfFree(func(peer.ID) bool { return false })
-	require.NoError(t, err)
-	require.True(t, saved)
-}
-
 func TestLoadSnapshotSweepsOrphanedTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cached-addr-book.ndjson")
@@ -333,8 +320,8 @@ func TestLoadSnapshotRoundTrip(t *testing.T) {
 	cab2, err := newCachedAddrBook(opts...)
 	require.NoError(t, err)
 
-	// The constructor discards the load counts; assert the contract Task 3
-	// wraps in metrics directly (the reload is idempotent).
+	// The constructor discards the load counts, so call loadSnapshot directly
+	// and assert them here (the reload is idempotent).
 	peers, addrs, err := cab2.loadSnapshot()
 	require.NoError(t, err)
 	require.Equal(t, 3, peers)
@@ -446,6 +433,8 @@ func TestLoadSnapshotSkipsMalformedLines(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, peers)
 	require.Equal(t, 1, addrs)
+	require.Equal(t, float64(peers), testutil.ToFloat64(snapshotRestoredPeers))
+	require.Equal(t, float64(addrs), testutil.ToFloat64(snapshotRestoredAddrs))
 }
 
 func TestLoadSnapshotCorrupt(t *testing.T) {
@@ -516,4 +505,138 @@ func TestWithSnapshotValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, cab.snapshotPath)
 	require.Equal(t, time.Minute, cab.snapshotInterval)
+}
+
+// A scanner error is the partial-apply path: the entries read before it are
+// already in the book, so the restored gauges have to count them rather than
+// reporting the zero of a failed load.
+func TestLoadSnapshotPartialApplySetsGauges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "addrbook.snap")
+
+	p := genPeerID(t)
+	header, err := json.Marshal(snapshotHeader{Version: snapshotFormatVersion, Time: time.Now()})
+	require.NoError(t, err)
+	entry, err := json.Marshal(snapshotEntry{
+		ID:      p,
+		Addrs:   []string{"/ip4/1.2.3.4/tcp/4001"},
+		Written: time.Now(),
+	})
+	require.NoError(t, err)
+
+	// A line past the scanner's 1 MiB token limit, after one good entry.
+	huge := strings.Repeat("x", 2*1024*1024)
+	content := fmt.Sprintf("%s\n%s\n%s\n", header, entry, huge)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
+	require.NoError(t, err)
+
+	peers, addrs, err := cab.loadSnapshot()
+	require.Error(t, err) // the oversized line fails the scan
+	require.Equal(t, 1, peers)
+	require.Equal(t, 1, addrs)
+
+	// The book holds what the counts say, and so do the gauges.
+	require.Equal(t, []string{"/ip4/1.2.3.4/tcp/4001"}, maStrings(cab.addrBook.Addrs(p)))
+	require.Equal(t, float64(peers), testutil.ToFloat64(snapshotRestoredPeers))
+	require.Equal(t, float64(addrs), testutil.ToFloat64(snapshotRestoredAddrs))
+}
+
+// A Written in the future must not buy an entry a TTL beyond the configured
+// maximum. The TTL is not readable through pstoremem, so it is asserted
+// indirectly: present right after the load, gone once the configured TTL has
+// elapsed.
+func TestLoadSnapshotClampsFutureWriteTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "addrbook.snap")
+
+		const ttl = time.Minute
+		p := genPeerID(t)
+		writeSnapshotFile(t, path,
+			snapshotHeader{Version: snapshotFormatVersion, Time: time.Now()},
+			snapshotEntry{
+				ID:      p,
+				Addrs:   []string{"/ip4/1.2.3.4/tcp/4001"},
+				Written: time.Now().Add(time.Hour), // clock skew, or a foreign snapshot
+			},
+		)
+
+		cab, err := newCachedAddrBook(
+			WithAllowPrivateIPs(),
+			WithRecentlyConnectedTTL(ttl),
+			WithSnapshot(path, time.Minute),
+		)
+		require.NoError(t, err)
+		defer cab.addrBook.(io.Closer).Close()
+
+		require.Equal(t, []string{"/ip4/1.2.3.4/tcp/4001"}, maStrings(cab.addrBook.Addrs(p)))
+
+		// Without the clamp the addr would have ttl+1h to live.
+		time.Sleep(ttl + time.Second)
+		require.Empty(t, cab.addrBook.Addrs(p), "a future Written must not extend the TTL")
+	})
+}
+
+// The shutdown save waits for a periodic save rather than skipping it, so the
+// snapshot left on disk when the process exits is the newer of the two.
+func TestSaveSnapshotWaitsForInFlightSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cached-addr-book.ndjson")
+
+	cab, err := newCachedAddrBook(WithAllowPrivateIPs(), WithSnapshot(path, time.Minute))
+	require.NoError(t, err)
+	cab.CacheAddrs(genPeerID(t), []types.Multiaddr{{Multiaddr: ma.StringCast("/ip4/1.2.3.4/tcp/4001")}})
+
+	// The first save holds snapshotMu for as long as its connected callback
+	// blocks, which is what a periodic save landing on shutdown looks like.
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	first := make(chan error, 1)
+	var firstDone atomic.Bool
+	go func() {
+		var once sync.Once
+		err := cab.saveSnapshot(func(peer.ID) bool {
+			once.Do(func() { close(entered) })
+			<-release
+			return false
+		})
+		firstDone.Store(true)
+		first <- err
+	}()
+	<-entered
+
+	// The second save must not return while the first still holds the lock.
+	second := make(chan error, 1)
+	go func() { second <- cab.saveSnapshot(func(peer.ID) bool { return false }) }()
+	select {
+	case <-second:
+		t.Fatal("the second save returned while the first still held the lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	beforeRelease := time.Now()
+	close(release)
+	require.NoError(t, <-first)
+	require.NoError(t, <-second)
+	require.True(t, firstDone.Load(), "the second save returned before the first finished")
+
+	// The file on disk is the second save's: its header is stamped when it
+	// took the lock, which is after the first one let go.
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	var header snapshotHeader
+	require.NoError(t, json.NewDecoder(f).Decode(&header))
+	require.True(t, header.Time.After(beforeRelease),
+		"the snapshot on disk is the earlier save's, so the later one was skipped")
+
+	// And nothing was left behind mid-write.
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		orphan, _ := filepath.Match(snapshotTempPattern, e.Name())
+		require.False(t, orphan, "temp file %s left behind", e.Name())
+	}
 }

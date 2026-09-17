@@ -519,11 +519,12 @@ func main() {
 }
 
 // snapshotFlagConfig validates the snapshot flags and derives the snapshot
-// path. An interval of 0 disables the snapshot and leaves the path empty; a
+// path, returning the path and the interval the snapshot should run on. An
+// interval of 0 disables the snapshot and leaves the path empty; a
 // positive interval requires datadir, because the snapshot is written to
 // <datadir>/cached-addr-book.ndjson, and a cached address book, which only
 // exists when --cached-addr-book is enabled and a DHT is not disabled.
-func snapshotFlagConfig(datadir string, cachedAddrBook bool, dhtType string, interval time.Duration) (path string, enabled time.Duration, err error) {
+func snapshotFlagConfig(datadir string, cachedAddrBook bool, dhtType string, interval time.Duration) (path string, snapshotInterval time.Duration, err error) {
 	if interval < 0 {
 		return "", 0, fmt.Errorf("cached-addr-book-snapshot-interval must be non-negative, got %s", interval)
 	}

@@ -423,15 +423,17 @@ func start(ctx context.Context, cfg *config) error {
 	go server.Close()
 	wg.Wait()
 
-	// Final snapshot so a restart resumes from the most recent state.
-	// TryLock, not Lock: a periodic save holding the lock has already
-	// produced a recent snapshot, and the shutdown save must never wait it
-	// out against the deployment's grace budget.
-	if cachedAddrBook != nil && cfg.cachedAddrBookSnapshotInterval > 0 {
-		if saved, err := cachedAddrBook.saveSnapshotIfFree(connected); err != nil {
+	// Final snapshot so a restart resumes from the most recent state. This
+	// blocks on a periodic save rather than skipping past it. Skipping loses
+	// up to one interval of state, and the in-flight save it defers to cannot
+	// finish anyway: start returns, main exits, and the goroutine holding the
+	// lock is killed mid-write, leaving an orphaned temp file behind. The
+	// wait is bounded by a single save - well under a second at fleet size,
+	// against a 30s deployment grace period. saveSnapshot is a no-op when the
+	// snapshot is disabled, and logs the save and its duration itself.
+	if cachedAddrBook != nil {
+		if err := cachedAddrBook.saveSnapshot(connected); err != nil {
 			logger.Errorw("saving cached addr book snapshot", "err", err)
-		} else if !saved {
-			logger.Info("skipping final address book snapshot, a periodic save is still running; its snapshot is recent enough for a warm restart")
 		}
 	}
 
