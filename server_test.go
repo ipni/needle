@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +15,47 @@ import (
 	"github.com/ipfs/boxo/routing/http/server"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRegisterPprof(t *testing.T) {
+	// The sampling rates registerPprof sets are process-wide, so put them back
+	// for the rest of the suite. SetMutexProfileFraction(-1) reads the current
+	// value without changing it; SetBlockProfileRate has no getter, so the
+	// best that can be done is to restore the runtime default of 0 (off).
+	oldMutex := runtime.SetMutexProfileFraction(-1)
+	t.Cleanup(func() {
+		runtime.SetMutexProfileFraction(oldMutex)
+		runtime.SetBlockProfileRate(0)
+	})
+
+	mux := http.NewServeMux()
+	registerPprof(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	for path, want := range map[string]string{
+		// The index lists the profiles, one of which is "goroutine"; the heap
+		// profile in debug mode starts with its own header.
+		"/debug/pprof/":             "goroutine",
+		"/debug/pprof/heap?debug=1": "heap profile",
+	} {
+		res, err := http.Get(srv.URL + path)
+		require.NoError(t, err)
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, res.StatusCode, path)
+		require.Contains(t, string(body), want, path)
+	}
+
+	// A mux nobody registered on must not serve profiles: the endpoints come
+	// from the named registrations above, not from importing net/http/pprof.
+	bare := httptest.NewServer(http.NewServeMux())
+	t.Cleanup(bare.Close)
+	res, err := http.Get(bare.URL + "/debug/pprof/")
+	require.NoError(t, err)
+	res.Body.Close()
+	require.Equal(t, http.StatusNotFound, res.StatusCode)
+}
 
 func TestCombineRouters(t *testing.T) {
 	t.Parallel()

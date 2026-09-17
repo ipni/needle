@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -136,8 +138,26 @@ type config struct {
 
 	tracingAuth      string
 	samplingFraction float64
+	pprof            bool
 
 	autoConf autoConfConfig
+}
+
+// registerPprof exposes the Go profiling endpoints on mux and turns on the
+// sampling that the mutex and block profiles need (both are off by default).
+// The handlers are registered by name rather than through net/http/pprof's
+// blank import, so nothing is served unless a caller asks for it.
+func registerPprof(mux *http.ServeMux) {
+	// 1 in 100 contention events, and one block event per 10us of blocking:
+	// enough to find a dominant lock without the overhead of full sampling.
+	runtime.SetMutexProfileFraction(100)
+	runtime.SetBlockProfileRate(10_000)
+
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 }
 
 func start(ctx context.Context, cfg *config) error {
@@ -337,6 +357,15 @@ func start(ctx context.Context, cfg *config) error {
 	http.Handle("/", handler)
 
 	http.Handle("/debug/metrics/prometheus", promhttp.Handler())
+
+	// Gated rather than always on: upstream someguy may be run with an API
+	// address that is not loopback, and pprof there would expose profiles and
+	// command line to the network. On loopback it is no more exposed than the
+	// metrics endpoint above.
+	if cfg.pprof {
+		registerPprof(http.DefaultServeMux)
+		fmt.Printf("pprof: http://127.0.0.1:%s/debug/pprof/\n", port)
+	}
 	http.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Client: %s\n", name)
 		fmt.Fprintf(w, "Version: %s\n", version)

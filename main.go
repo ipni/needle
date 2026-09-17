@@ -192,6 +192,12 @@ func main() {
 						EnvVars: []string{"SOMEGUY_SAMPLING_FRACTION"},
 						Usage:   "Fraction of routing requests to sample (0 to 1). Requests with Traceparent headers are always sampled, independent of this setting",
 					},
+					&cli.BoolFlag{
+						Name:    "pprof",
+						Value:   false,
+						EnvVars: []string{"SOMEGUY_PPROF"},
+						Usage:   "expose Go pprof profiles at /debug/pprof/ on the API address and enable mutex and block profile sampling",
+					},
 					&cli.StringFlag{
 						Name:    "datadir",
 						Value:   "",
@@ -263,6 +269,7 @@ func main() {
 
 						tracingAuth:      ctx.String("tracing-auth"),
 						samplingFraction: ctx.Float64("sampling-fraction"),
+						pprof:            ctx.Bool("pprof"),
 
 						autoConf: autoConfConfig{
 							enabled:         ctx.Bool("autoconf"),
@@ -277,6 +284,9 @@ func main() {
 					fmt.Printf("SOMEGUY_DHT = %s\n", cfg.dhtType)
 					if cfg.cachedAddrBookSnapshotInterval > 0 {
 						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL = %s\n", cfg.cachedAddrBookSnapshotInterval)
+					}
+					if cfg.pprof {
+						fmt.Printf("SOMEGUY_PPROF = true\n")
 					}
 					printIfListConfigured("SOMEGUY_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
 					printIfListConfigured("SOMEGUY_PEER_ENDPOINTS = ", cfg.peerEndpoints)

@@ -36,6 +36,8 @@ The environment variables below override `someguy`'s built-in defaults.
 - [Tracing](#tracing)
   - [`SOMEGUY_TRACING_AUTH`](#someguy_tracing_auth)
   - [`SOMEGUY_SAMPLING_FRACTION`](#someguy_sampling_fraction)
+- [Profiling](#profiling)
+  - [`SOMEGUY_PPROF`](#someguy_pprof)
 
 ## Configuration
 
@@ -294,3 +296,19 @@ To honor a `Traceparent` or `Tracestate` header, Someguy requires the request to
 Fraction of routing requests to sample (0 to 1). Applied independently of `Traceparent`-based sampling.
 
 Default: `0`
+
+## Profiling
+
+### `SOMEGUY_PPROF`
+
+Exposes the Go [pprof](https://pkg.go.dev/net/http/pprof) endpoints at `/debug/pprof/` on the API address (`SOMEGUY_LISTEN_ADDRESS`), and turns on the sampling that the mutex and block profiles need: `runtime.SetMutexProfileFraction(100)` and `runtime.SetBlockProfileRate(10000)`. Both are off in the Go runtime by default, so without this flag those two profiles come back empty.
+
+That sampling is not free - it instruments every contended lock acquisition and every blocking operation - so leave it off unless you are profiling.
+
+The endpoints serve the process's command line, its goroutine stacks and its heap, so treat them as you would `/debug/metrics/prometheus`: on a loopback API address they are no more exposed than the metrics, but on an API address reachable from the network they are.
+
+```console
+$ curl -o cpu.pprof 'http://127.0.0.1:8190/debug/pprof/profile?seconds=30'
+```
+
+Default: `false`
