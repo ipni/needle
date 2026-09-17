@@ -145,8 +145,10 @@ type config struct {
 
 // registerPprof exposes the Go profiling endpoints on mux and turns on the
 // sampling that the mutex and block profiles need (both are off by default).
-// The handlers are registered by name rather than through net/http/pprof's
-// blank import, so nothing is served unless a caller asks for it.
+//
+// The handlers are registered by name because net/http/pprof's own init does
+// the same thing on http.DefaultServeMux, which is not the mux the API server
+// serves; see apiMux.
 func registerPprof(mux *http.ServeMux) {
 	// 1 in 100 contention events, and one block event per 10us of blocking:
 	// enough to find a dominant lock without the overhead of full sampling.
@@ -158,6 +160,35 @@ func registerPprof(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+}
+
+// apiMux builds the mux the API server serves: the routing handler, the metrics
+// endpoint, /version, and the pprof endpoints when they are switched on.
+//
+// This is deliberately a mux of someguy's own rather than http.DefaultServeMux,
+// which is what the server used before profiling existed. Importing
+// net/http/pprof registers the profiling endpoints on the default mux in that
+// package's init, so on the default mux the profiles would be served whatever
+// --pprof said. A mux of our own is the only way the flag can actually gate
+// them. Nothing else someguy runs registers on the default mux.
+func apiMux(handler http.Handler, cfg *config) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/", handler)
+	mux.Handle("/debug/metrics/prometheus", promhttp.Handler())
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Client: %s\n", name)
+		fmt.Fprintf(w, "Version: %s\n", version)
+	})
+
+	// Gated rather than always on: someguy may be run with an API address that
+	// is not loopback, and pprof there would expose the profiles and the
+	// command line to the network. On loopback it is no more exposed than the
+	// metrics endpoint above.
+	if cfg.pprof {
+		registerPprof(mux)
+	}
+
+	return mux
 }
 
 func start(ctx context.Context, cfg *config) error {
@@ -354,24 +385,11 @@ func start(ctx context.Context, cfg *config) error {
 	// Add request tracing
 	handler = withTracingAndDebug(handler, cfg.tracingAuth)
 
-	http.Handle("/", handler)
-
-	http.Handle("/debug/metrics/prometheus", promhttp.Handler())
-
-	// Gated rather than always on: upstream someguy may be run with an API
-	// address that is not loopback, and pprof there would expose profiles and
-	// command line to the network. On loopback it is no more exposed than the
-	// metrics endpoint above.
 	if cfg.pprof {
-		registerPprof(http.DefaultServeMux)
 		fmt.Printf("pprof: http://127.0.0.1:%s/debug/pprof/\n", port)
 	}
-	http.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Client: %s\n", name)
-		fmt.Fprintf(w, "Version: %s\n", version)
-	})
 
-	server := &http.Server{Addr: cfg.listenAddress, Handler: nil}
+	server := &http.Server{Addr: cfg.listenAddress, Handler: apiMux(handler, cfg)}
 	quit := make(chan os.Signal, 3)
 	var wg sync.WaitGroup
 	wg.Add(1)

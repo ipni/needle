@@ -57,6 +57,47 @@ func TestRegisterPprof(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, res.StatusCode)
 }
 
+// TestAPIMuxPprofGate is the test the unit test above cannot be: registerPprof
+// on a mux of its own says nothing about what the API server serves. The first
+// version of this change registered on http.DefaultServeMux, where
+// net/http/pprof's init has already registered the same endpoints, so the
+// profiles were served with the flag off and the flag on panicked on the
+// conflicting patterns. Both show up here.
+func TestAPIMuxPprofGate(t *testing.T) {
+	oldMutex := runtime.SetMutexProfileFraction(-1)
+	t.Cleanup(func() {
+		runtime.SetMutexProfileFraction(oldMutex)
+		runtime.SetBlockProfileRate(0)
+	})
+
+	for _, tc := range []struct {
+		name       string
+		pprof      bool
+		wantStatus int
+	}{
+		{name: "off", pprof: false, wantStatus: http.StatusNotFound},
+		{name: "on", pprof: true, wantStatus: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(apiMux(http.NotFoundHandler(), &config{pprof: tc.pprof}))
+			t.Cleanup(srv.Close)
+
+			res, err := http.Get(srv.URL + "/debug/pprof/")
+			require.NoError(t, err)
+			res.Body.Close()
+			require.Equal(t, tc.wantStatus, res.StatusCode)
+
+			// The endpoints the server has always served are unaffected.
+			for _, path := range []string{"/version", "/debug/metrics/prometheus"} {
+				res, err := http.Get(srv.URL + path)
+				require.NoError(t, err)
+				res.Body.Close()
+				require.Equal(t, http.StatusOK, res.StatusCode, path)
+			}
+		})
+	}
+}
+
 func TestCombineRouters(t *testing.T) {
 	t.Parallel()
 
