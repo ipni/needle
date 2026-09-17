@@ -204,6 +204,12 @@ func main() {
 						EnvVars: []string{"SOMEGUY_ROUTER_TRACE"},
 						Usage:   "log one line per parallel routing request with per-router first-result, done and record counts; high volume, for experiments only",
 					},
+					&cli.DurationFlag{
+						Name:    "dht-tail-budget",
+						Value:   0,
+						EnvVars: []string{"SOMEGUY_DHT_TAIL_BUDGET"},
+						Usage:   "once every non-DHT router in a request has finished, give the DHT this much longer and then stop waiting for it; 0 disables. Requests served by the DHT alone are never cut.",
+					},
 					&cli.StringFlag{
 						Name:    "datadir",
 						Value:   "",
@@ -242,6 +248,10 @@ func main() {
 					if err != nil {
 						return err
 					}
+					dhtTailBudget := ctx.Duration("dht-tail-budget")
+					if dhtTailBudget < 0 {
+						return fmt.Errorf("dht-tail-budget must be non-negative, got %s (0 disables)", dhtTailBudget)
+					}
 					snapshotPath, snapshotInterval, err := snapshotFlagConfig(ctx.String("datadir"), ctx.Bool("cached-addr-book"), ctx.String("dht"), ctx.Duration("cached-addr-book-snapshot-interval"))
 					if err != nil {
 						return err
@@ -277,6 +287,7 @@ func main() {
 						samplingFraction: ctx.Float64("sampling-fraction"),
 						pprof:            ctx.Bool("pprof"),
 						routerTrace:      ctx.Bool("router-trace"),
+						dhtTailBudget:    dhtTailBudget,
 
 						autoConf: autoConfConfig{
 							enabled:         ctx.Bool("autoconf"),
@@ -297,6 +308,9 @@ func main() {
 					}
 					if cfg.routerTrace {
 						fmt.Printf("SOMEGUY_ROUTER_TRACE = true\n")
+					}
+					if cfg.dhtTailBudget > 0 {
+						fmt.Printf("SOMEGUY_DHT_TAIL_BUDGET = %s\n", cfg.dhtTailBudget)
 					}
 					printIfListConfigured("SOMEGUY_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
 					printIfListConfigured("SOMEGUY_PEER_ENDPOINTS = ", cfg.peerEndpoints)

@@ -12,6 +12,7 @@ The environment variables below override `someguy`'s built-in defaults.
   - [`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`](#someguy_cached_addr_book_snapshot_interval)
   - [`SOMEGUY_DNSADDR_RESOLUTION`](#someguy_dnsaddr_resolution)
   - [`SOMEGUY_ROUTING_TIMEOUT`](#someguy_routing_timeout)
+  - [`SOMEGUY_DHT_TAIL_BUDGET`](#someguy_dht_tail_budget)
   - [`SOMEGUY_RECORDS_LIMIT`](#someguy_records_limit)
   - [`SOMEGUY_STREAMING_RECORDS_LIMIT`](#someguy_streaming_records_limit)
   - [`SOMEGUY_PROVIDER_ENDPOINTS`](#someguy_provider_endpoints)
@@ -118,6 +119,20 @@ Maximum time one `/routing/v1` request spends in the routers.
 Keep this below the timeout the client applies to the whole request. A client that gives up first loses every record Someguy found, because the response is still open when the client disconnects. Helia's delegated routing client allows 30 seconds and starts its timer before Someguy starts this one.
 
 Default: `25s`
+
+### `SOMEGUY_DHT_TAIL_BUDGET`
+
+How long the DHT may keep a request open after every non-DHT router in it has finished, before Someguy stops waiting for it and returns what it has. The delegated and block-provider routers answer first; the DHT is the one that trails. When the last non-DHT router finishes, this budget starts, and when it runs out the DHT's lookup is cancelled and the response closes with whatever records have arrived.
+
+It trades a little recall for a lot of tail latency: a request that would otherwise wait out the whole DHT walk now ends one budget after the fast routers are done. The cost is the DHT-exclusive records that would have arrived in that window - small, because by then the other endpoints have already answered.
+
+The cut only fires when there is something to wait on: a request served by the DHT alone, or one where every router is the DHT, is never cut, because there is no faster answer to return early for. A budget of `0` (the default) disables it entirely and Someguy behaves as before.
+
+```console
+$ SOMEGUY_DHT_TAIL_BUDGET=500ms someguy start
+```
+
+Default: `0` (disabled)
 
 ### `SOMEGUY_RECORDS_LIMIT`
 
