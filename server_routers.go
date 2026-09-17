@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ipfs/boxo/ipns"
@@ -50,6 +51,11 @@ type ipnsRouter interface {
 type dhtRouter interface {
 	GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error)
 }
+
+// dhtMarker is satisfied only by the DHT-backed router. The tail cut uses it
+// to tell the DHT - the one it may cancel - from the delegated routers it waits
+// on.
+type dhtMarker interface{ isDHT() }
 
 var _ server.ContentRouter = composableRouter{}
 
@@ -115,9 +121,11 @@ const (
 
 	// A router is "exhausted" when its iterator ran out, "cancelled" when the
 	// request ended under it - the records limit was reached, or the client
-	// went away.
+	// went away - and "cut" when the DHT tail budget expired and its context
+	// was cancelled.
 	routerDoneExhausted = "exhausted"
 	routerDoneCancelled = "cancelled"
+	routerDoneCut       = "cut"
 )
 
 // routerTimingBuckets spans the range these lookups actually live in: a
@@ -184,13 +192,12 @@ var (
 	}, []string{"router"})
 )
 
-// routerName gives one member of a parallelRouter a stable, low-cardinality
-// metric label. combineRouters wraps the DHT in sanitizeRouter and (when the
-// address book is on) cachedRouter, so the wrappers are peeled off until the
-// router that does the work is reached. The label set is therefore at most one
-// "dht" plus one per configured delegated endpoint.
-func routerName(r router) string {
-	// Bounded so a wrapper that somehow wrapped itself cannot spin here.
+// unwrapRouter peels the wrappers combineRouters puts around a router -
+// sanitizeRouter, cachedRouter and dnsAddrRouter - until the router that does
+// the work is reached. Bounded so a wrapper that somehow wrapped itself cannot
+// spin here. The tail cut and the metric label both need to see past the
+// wrappers, so they share this rather than each keeping its own peel loop.
+func unwrapRouter(r router) router {
 	for range 8 {
 		switch v := r.(type) {
 		case sanitizeRouter:
@@ -199,15 +206,38 @@ func routerName(r router) string {
 			r = v.router
 		case dnsAddrRouter:
 			r = v.router
-		case libp2pRouter:
-			return "dht"
-		case clientRouter:
-			return "delegated:" + v.name
 		default:
-			return "other"
+			return r
 		}
 	}
-	return "other"
+	return r
+}
+
+// routerLabeler is an optional interface a router can implement to supply its
+// own metric label. It exists so tests can stand in for the DHT and delegated
+// endpoints with named fakes; production routers are labelled by their concrete
+// type below.
+type routerLabeler interface{ routerLabel() string }
+
+// routerName gives one member of a parallelRouter a stable, low-cardinality
+// metric label. combineRouters wraps the DHT in sanitizeRouter and (when the
+// address book is on) cachedRouter, so the wrappers are peeled off until the
+// router that does the work is reached. The label set is therefore at most one
+// "dht" plus one per configured delegated endpoint. A router that implements
+// routerLabeler supplies its own name and is not unwrapped.
+func routerName(r router) string {
+	unwrapped := unwrapRouter(r)
+	if l, ok := unwrapped.(routerLabeler); ok {
+		return l.routerLabel()
+	}
+	switch v := unwrapped.(type) {
+	case libp2pRouter:
+		return "dht"
+	case clientRouter:
+		return "delegated:" + v.name
+	default:
+		return "other"
+	}
 }
 
 // recordKey identifies a record for the exclusive-records count. peer.ID is a
@@ -304,22 +334,19 @@ func (rt *routerTrace) record(i int, v any) {
 	}
 }
 
-// finish notes that router i's goroutine has exited. cancelled is true only
-// when the request ended under it - the records limit was reached, or the
-// client went away - as opposed to its iterator running out.
+// finish notes that router i's goroutine has exited, with the reason:
+// exhausted when its iterator ran out, cut when the DHT tail budget expired
+// and cancelled its context, cancelled when the request ended under it - the
+// records limit was reached, or the client went away.
 //
 // The routers serialise here, so the last caller is the last finisher and
 // prevDone is the one before it, which is what makes the tail a plain
 // subtraction.
-func (rt *routerTrace) finish(i int, cancelled bool) {
+func (rt *routerTrace) finish(i int, reason string) {
 	if rt == nil {
 		return
 	}
 	elapsed := time.Since(rt.start)
-	reason := routerDoneExhausted
-	if cancelled {
-		reason = routerDoneCancelled
-	}
 
 	rt.mu.Lock()
 	rt.done[i] = elapsed
@@ -336,12 +363,13 @@ func (rt *routerTrace) finish(i int, cancelled bool) {
 // once (a key produced by exactly one router is exclusive to it), observes the
 // tail the last router held the request open for, and emits the trace line. It
 // runs exactly once, from whichever of the closer goroutine and Close reaches
-// it first.
-func (rt *routerTrace) finalize(cancelled bool) {
+// it first. reason is the request-level outcome: exhausted when every router
+// ran out, cut when the DHT tail budget ended the request, cancelled otherwise.
+func (rt *routerTrace) finalize(reason string) {
 	if rt == nil {
 		return
 	}
-	rt.once.Do(func() { rt.emit(cancelled) })
+	rt.once.Do(func() { rt.emit(reason) })
 }
 
 // routerTraceSnapshot is one request's finished timing, taken under the lock so
@@ -379,7 +407,7 @@ func (rt *routerTrace) snapshot() routerTraceSnapshot {
 	}
 }
 
-func (rt *routerTrace) emit(cancelled bool) {
+func (rt *routerTrace) emit(reason string) {
 	snap := rt.snapshot()
 
 	for i, n := range rt.names {
@@ -398,19 +426,14 @@ func (rt *routerTrace) emit(cancelled bool) {
 	if !rt.log {
 		return
 	}
-	logger.Infow("parallel routing request", rt.traceFields(snap, cancelled)...)
+	logger.Infow("parallel routing request", rt.traceFields(snap, reason)...)
 }
 
 // traceFields is the one trace line's payload: the request as a whole, then
 // four fields per router. A router that produced nothing has zero records and
 // a first_ms of -1, which is the "never happened" marker - zero would read as
 // "instantly".
-func (rt *routerTrace) traceFields(snap routerTraceSnapshot, cancelled bool) []any {
-	reason := routerDoneExhausted
-	if cancelled {
-		reason = routerDoneCancelled
-	}
-
+func (rt *routerTrace) traceFields(snap routerTraceSnapshot, reason string) []any {
 	fields := make([]any, 0, 6+8*len(rt.names))
 	fields = append(fields, "op", rt.op, "total_ms", durationMillis(snap.lastDone), "reason", reason)
 	for i, n := range rt.names {
@@ -440,21 +463,24 @@ type parallelRouter struct {
 	// trace turns on the per-request trace line (--router-trace). The metrics
 	// above are always on; only the log line is gated.
 	trace bool
+	// dhtTailBudget bounds how long the DHT may keep a request open after every
+	// other router has finished; 0 disables the cut.
+	dhtTailBudget time.Duration
 }
 
 func (r parallelRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
-	return find(ctx, r.routers, routerOpProviders, r.trace, func(ri router) (iter.ResultIter[types.Record], error) {
+	return find(ctx, r.routers, routerOpProviders, r.trace, r.dhtTailBudget, func(ri router, ctx context.Context) (iter.ResultIter[types.Record], error) {
 		return ri.FindProviders(ctx, key, limit)
 	})
 }
 
 func (r parallelRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
-	return find(ctx, r.routers, routerOpPeers, r.trace, func(ri router) (iter.ResultIter[*types.PeerRecord], error) {
+	return find(ctx, r.routers, routerOpPeers, r.trace, r.dhtTailBudget, func(ri router, ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
 		return ri.FindPeers(ctx, pid, limit)
 	})
 }
 
-func find[T any](ctx context.Context, routers []router, op string, trace bool, call func(router) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
+func find[T any](ctx context.Context, routers []router, op string, trace bool, dhtTailBudget time.Duration, call func(router, context.Context) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
 	// The clock starts here, not after the iterators are built: creating a
 	// delegated iterator is an HTTP round trip, and that is part of what the
 	// router cost the request.
@@ -464,21 +490,31 @@ func find[T any](ctx context.Context, routers []router, op string, trace bool, c
 	case 0:
 		return iter.ToResultIter(iter.FromSlice([]T{})), nil
 	case 1:
-		return call(routers[0])
+		return call(routers[0], ctx)
 	}
 
 	its := make([]iter.ResultIter[T], 0, len(routers))
 	names := make([]string, 0, len(routers))
+	cuttable := make([]bool, 0, len(routers))
+	cancels := make([]context.CancelFunc, 0, len(routers))
 	var err error
 	for _, ri := range routers {
-		it, itErr := call(ri)
+		// Each router gets its own context so the DHT tail cut can cancel the
+		// DHT alone. Cancelling a finished iterator's context is harmless, so
+		// every one is kept until Close.
+		rctx, rcancel := context.WithCancel(ctx)
+		it, itErr := call(ri, rctx)
 
 		if itErr != nil {
+			rcancel()
 			logger.Warnf("error from router: %w", itErr)
 			err = errors.Join(err, itErr)
 		} else {
 			its = append(its, it)
 			names = append(names, routerName(ri))
+			_, isDHT := unwrapRouter(ri).(dhtMarker)
+			cuttable = append(cuttable, isDHT)
+			cancels = append(cancels, rcancel)
 		}
 	}
 
@@ -491,11 +527,11 @@ func find[T any](ctx context.Context, routers []router, op string, trace bool, c
 	}
 
 	// Otherwise return manyIter with remaining iterators.
-	return newManyIter(ctx, its, newRouterTrace(op, names, start, trace)), nil
+	return newManyIter(ctx, its, cancels, cuttable, dhtTailBudget, newRouterTrace(op, names, start, trace)), nil
 }
 
 func (r parallelRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
-	return find(ctx, r.routers, routerOpClosest, r.trace, func(ri router) (iter.ResultIter[*types.PeerRecord], error) {
+	return find(ctx, r.routers, routerOpClosest, r.trace, r.dhtTailBudget, func(ri router, ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
 		return ri.GetClosestPeers(ctx, key)
 	})
 }
@@ -509,17 +545,54 @@ type manyIter[T any] struct {
 	val    iter.Result[T]
 	done   bool
 	trace  *routerTrace // nil disables the timing entirely
+
+	// DHT tail cut. cancels[i] is router i's context cancel; cuttable marks
+	// the routers a cut may cancel (the DHT); budget <= 0 or no cuttable and
+	// non-cuttable pair means no timer is ever armed.
+	cancels  []context.CancelFunc
+	cuttable []bool
+	budget   time.Duration
+
+	mu            sync.Mutex
+	timer         *time.Timer
+	timersPending int // non-cuttable iterators that have not finished yet
+
+	// cut is set by the timer callback when the DHT tail budget expires. It is
+	// atomic because the writer (the timer goroutine) and the readers (a router
+	// goroutine finishing, the closer goroutine) never share a lock: a cuttable
+	// router woken by Close reads it while the timer may still be writing it.
+	cut atomic.Bool
 }
 
-func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], trace *routerTrace) *manyIter[T] {
+func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], cancels []context.CancelFunc, cuttable []bool, budget time.Duration, trace *routerTrace) *manyIter[T] {
 	ctx, cancel := context.WithCancel(ctx)
 
 	mi := &manyIter[T]{
-		ctx:    ctx,
-		cancel: cancel,
-		its:    its,
-		ch:     make(chan iter.Result[T]),
-		trace:  trace,
+		ctx:      ctx,
+		cancel:   cancel,
+		its:      its,
+		ch:       make(chan iter.Result[T]),
+		trace:    trace,
+		cancels:  cancels,
+		cuttable: cuttable,
+		budget:   budget,
+	}
+
+	// The cut arms only when it can fire: a positive budget, something to cut
+	// (a DHT), and something to wait for (a non-DHT router). A request served
+	// by the DHT alone, or one with no DHT at all, never cuts.
+	if mi.budget > 0 && trace != nil {
+		hasCuttable := false
+		for i := range its {
+			if mi.cuttable[i] {
+				hasCuttable = true
+			} else {
+				mi.timersPending++
+			}
+		}
+		if !hasCuttable || mi.timersPending == 0 {
+			mi.budget = 0
+		}
 	}
 
 	for i, it := range its {
@@ -534,7 +607,7 @@ func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], trace *ro
 						trace.record(i, val.Val)
 					}
 				case <-ctx.Done():
-					trace.finish(i, true)
+					trace.finish(i, mi.finishReason(i))
 					return
 				}
 			}
@@ -544,19 +617,90 @@ func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], trace *ro
 			// often push its last records into the drain and then run out. The
 			// question the label answers is whether the request had already
 			// ended, so that is what it is read from.
-			trace.finish(i, ctx.Err() != nil)
+			trace.finish(i, mi.finishReason(i))
+			if i < len(mi.cuttable) && !mi.cuttable[i] {
+				mi.maybeArmCut()
+			}
 		}(i, it)
 	}
 
 	go func() {
 		mi.wg.Wait()
+		mi.stopCut()
 		// Before the close, so a consumer that returns the moment the channel
 		// closes cannot race the trace line for the request it just finished.
-		trace.finalize(ctx.Err() != nil)
+		trace.finalize(mi.requestReason())
 		close(mi.ch)
 	}()
 
 	return mi
+}
+
+// finishReason is why router i's goroutine is leaving: cut when the tail cut
+// fired (its context ended under it, so read the cut flag rather than ctx),
+// cancelled when the request ended some other way, exhausted when its iterator
+// ran out while the request was still on.
+func (mi *manyIter[T]) finishReason(i int) string {
+	if i < len(mi.cuttable) && mi.cuttable[i] && mi.trace != nil && mi.cut.Load() {
+		return routerDoneCut
+	}
+	if mi.ctx.Err() != nil {
+		return routerDoneCancelled
+	}
+	return routerDoneExhausted
+}
+
+// requestReason is the request-level outcome for the trace line: cut when the
+// tail cut ended the request, cancelled when it ended some other way,
+// exhausted when every router ran out.
+func (mi *manyIter[T]) requestReason() string {
+	if mi.trace != nil && mi.cut.Load() {
+		return routerDoneCut
+	}
+	if mi.ctx.Err() != nil {
+		return routerDoneCancelled
+	}
+	return routerDoneExhausted
+}
+
+// maybeArmCut starts the cut timer when the last non-cuttable iterator has
+// finished. One timer per request, started at most once: after it is armed,
+// timersPending stays 0 and no further call can start a second one.
+func (mi *manyIter[T]) maybeArmCut() {
+	if mi.budget <= 0 || mi.trace == nil {
+		return
+	}
+	mi.mu.Lock()
+	if mi.timersPending > 0 {
+		mi.timersPending--
+		if mi.timersPending > 0 {
+			mi.mu.Unlock()
+			return
+		}
+	} else if mi.timer != nil {
+		mi.mu.Unlock()
+		return
+	}
+	mi.timer = time.AfterFunc(mi.budget, func() {
+		mi.cut.Store(true)
+		for i := range mi.its {
+			if mi.cuttable[i] {
+				mi.cancels[i]()
+			}
+		}
+	})
+	mi.mu.Unlock()
+}
+
+// stopCut stops the cut timer if it is still pending. Called when the request
+// ends, so a cut never fires after the response is written; it is harmless to
+// call more than once.
+func (mi *manyIter[T]) stopCut() {
+	mi.mu.Lock()
+	if mi.timer != nil {
+		mi.timer.Stop()
+	}
+	mi.mu.Unlock()
 }
 
 func (mi *manyIter[T]) Next() bool {
@@ -588,6 +732,16 @@ func (mi *manyIter[T]) Close() error {
 	}
 	mi.done = true
 	mi.cancel() // Signal goroutines to stop
+	mi.stopCut()
+
+	// Cancel the per-router contexts before the drain: a router blocked inside
+	// Next on its own context would otherwise never call wg.Done, and the drain
+	// below waits for it. Cancelling a finished iterator's context is harmless.
+	for i := range mi.its {
+		if i < len(mi.cancels) {
+			mi.cancels[i]()
+		}
+	}
 
 	// The channel will be closed by the goroutine in newManyIter once all workers finish
 	// We just need to drain it to unblock any pending sends
@@ -598,12 +752,11 @@ func (mi *manyIter[T]) Close() error {
 
 	// The closer goroutine finalizes before it closes the channel, so by here
 	// it has already run; this is only for the case where it somehow has not.
-	mi.trace.finalize(true)
+	mi.trace.finalize(mi.requestReason())
 
-	// Now close child iterators
 	var err error
-	for _, it := range mi.its {
-		err = errors.Join(err, it.Close())
+	for i := range mi.its {
+		err = errors.Join(err, mi.its[i].Close())
 	}
 	if err != nil {
 		logger.Warnf("errors on closing iterators: %w", err)
@@ -753,6 +906,8 @@ type libp2pRouter struct {
 	host    host.Host
 	routing routing.Routing
 }
+
+func (libp2pRouter) isDHT() {}
 
 func (d libp2pRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
 	ctx, cancel := context.WithCancel(ctx)

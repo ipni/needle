@@ -141,6 +141,7 @@ type config struct {
 	samplingFraction float64
 	pprof            bool
 	routerTrace      bool
+	dhtTailBudget    time.Duration
 
 	autoConf autoConfConfig
 }
@@ -310,9 +311,9 @@ func start(ctx context.Context, cfg *config) error {
 		fmt.Printf("Resolving /dnsaddr provider addresses: %s\n", cfg.dnsAddrResolution)
 	}
 
-	crRouters := combineRouters(h, dhtRouting, cachedAddrBook, providerHTTPRouters, blockProviderRouters, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL)
-	prRouters := combineRouters(h, dhtRouting, cachedAddrBook, peerHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL)
-	ipnsRouters := combineRouters(h, dhtRouting, cachedAddrBook, ipnsHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL)
+	crRouters := combineRouters(h, dhtRouting, cachedAddrBook, providerHTTPRouters, blockProviderRouters, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL, cfg.dhtTailBudget)
+	prRouters := combineRouters(h, dhtRouting, cachedAddrBook, peerHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL, cfg.dhtTailBudget)
+	ipnsRouters := combineRouters(h, dhtRouting, cachedAddrBook, ipnsHTTPRouters, nil, dnsAddr, cfg.dnsAddrResolution, cfg.routerTrace, cfg.cachedAddrBookNegativeTTL, cfg.dhtTailBudget)
 
 	// Create DHT router for GetClosestPeers endpoint
 	var dhtRouters router
@@ -490,7 +491,7 @@ func newHost(cfg *config) (host.Host, error) {
 
 // combineRouters combines delegated HTTP routers with DHT and additional routers.
 // It no longer creates HTTP clients (that's done in createDelegatedHTTPRouters).
-func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddrBook, delegatedRouters, additionalRouters []router, dnsAddr *dnsAddrResolver, dnsAddrMode DNSAddrResolution, routerTrace bool, negativeTTL time.Duration) router {
+func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddrBook, delegatedRouters, additionalRouters []router, dnsAddr *dnsAddrResolver, dnsAddrMode DNSAddrResolution, routerTrace bool, negativeTTL, dhtTailBudget time.Duration) router {
 	var dhtRouter router
 
 	if cachedAddrBook != nil {
@@ -517,7 +518,7 @@ func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddr
 	// Resolution wraps the composed router rather than sitting beside
 	// sanitizeRouter, because /dnsaddr records reach someguy from the delegated
 	// HTTP routers, which sanitizeRouter does not cover.
-	return withDNSAddrResolution(parallelRouter{routers: routers, trace: routerTrace}, dnsAddr, dnsAddrMode)
+	return withDNSAddrResolution(parallelRouter{routers: routers, trace: routerTrace, dhtTailBudget: dhtTailBudget}, dnsAddr, dnsAddrMode)
 }
 
 func withDNSAddrResolution(r router, resolver *dnsAddrResolver, mode DNSAddrResolution) router {

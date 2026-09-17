@@ -653,7 +653,7 @@ func TestManyIter(t *testing.T) {
 		ctx := t.Context()
 
 		its := newMockIters[int](ctx, 2)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
 
 		go func() {
 			its[0].ch <- iter.Result[int]{Val: 0}
@@ -688,7 +688,7 @@ func TestManyIter(t *testing.T) {
 		ctx := t.Context()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
 
 		go func() {
 			close(its[0].ch)
@@ -719,7 +719,7 @@ func TestManyIter(t *testing.T) {
 		defer cancel()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
 
 		go func() {
 			its[3].ch <- iter.Result[int]{Val: 3}
@@ -745,7 +745,7 @@ func TestManyIter(t *testing.T) {
 		defer cancel()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
 
 		go func() {
 			its[1].ch <- iter.Result[int]{Val: 1}
@@ -959,7 +959,7 @@ func TestRouterTimingExhausted(t *testing.T) {
 	slowIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("C"), peerRec("D")}, delay: delay}
 
 	trace := newRouterTrace(op, []string{fast, slow}, time.Now(), true)
-	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, trace)
+	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, nil, nil, 0, trace)
 
 	got, err := iter.ReadAllResults(mi)
 	require.NoError(t, err)
@@ -995,7 +995,7 @@ func TestRouterTimingExhausted(t *testing.T) {
 	require.Equal(t, 1.0, counterVal(t, routerLastFinisher, slow)-lastBefore)
 
 	// The trace line: one entry for the request, four per router.
-	f := fieldsMap(t, trace.traceFields(trace.snapshot(), false))
+	f := fieldsMap(t, trace.traceFields(trace.snapshot(), routerDoneExhausted))
 	require.Equal(t, op, f["op"])
 	require.Equal(t, routerDoneExhausted, f["reason"])
 	require.Equal(t, 3, f[fast+"_records"])
@@ -1028,7 +1028,7 @@ func TestRouterTimingCancelled(t *testing.T) {
 	slowIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("X")}, delayEnd: 200 * time.Millisecond}
 
 	trace := newRouterTrace(op, []string{fast, slow}, time.Now(), true)
-	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, trace)
+	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, nil, nil, 0, trace)
 
 	// Exactly the four records available without waiting out the delay.
 	for range 4 {
@@ -1049,11 +1049,11 @@ func TestRouterTimingCancelled(t *testing.T) {
 	// from Close cannot double-count.
 	require.Equal(t, 1.0, counterVal(t, routerLastFinisher, slow)-lastBefore)
 	require.Equal(t, 1.0, counterVal(t, routerExclusiveRecords, op, slow)-excBefore, "X, forwarded before the cancel")
-	trace.finalize(true)
+	trace.finalize(routerDoneCancelled)
 	require.Equal(t, 1.0, counterVal(t, routerLastFinisher, slow)-lastBefore)
 	require.Equal(t, 1.0, counterVal(t, routerExclusiveRecords, op, slow)-excBefore)
 
-	f := fieldsMap(t, trace.traceFields(trace.snapshot(), true))
+	f := fieldsMap(t, trace.traceFields(trace.snapshot(), routerDoneCancelled))
 	require.Equal(t, routerDoneCancelled, f["reason"])
 	require.Equal(t, 1, f[slow+"_records"])
 	require.Equal(t, 3, f[fast+"_records"])
@@ -1068,10 +1068,10 @@ func TestRouterTraceFieldsForSilentRouter(t *testing.T) {
 
 	trace := newRouterTrace(op, []string{quiet, other}, time.Now(), true)
 	trace.record(1, peerRec("A").Val)
-	trace.finish(1, false)
-	trace.finish(0, false)
+	trace.finish(1, routerDoneExhausted)
+	trace.finish(0, routerDoneExhausted)
 
-	f := fieldsMap(t, trace.traceFields(trace.snapshot(), false))
+	f := fieldsMap(t, trace.traceFields(trace.snapshot(), routerDoneExhausted))
 	require.Equal(t, int64(-1), f[quiet+"_first_ms"], "a router that produced nothing has no first result")
 	require.Equal(t, 0, f[quiet+"_records"])
 	require.Equal(t, 0, f[quiet+"_exclusive"])
@@ -1101,4 +1101,546 @@ func TestEndpointLabel(t *testing.T) {
 	require.Equal(t, "example.com:8080", endpointLabel("http://example.com:8080/x"))
 	// No host to take: keep the whole thing rather than label it "".
 	require.Equal(t, "not a url", endpointLabel("not a url"))
+}
+
+// ---------------------------------------------------------------------------
+// DHT tail budget.
+//
+// The cut is built through find with fakes so the per-router contexts are the
+// ones under test: a fake's Next blocks on the context it was created with and
+// records when that context ended, which is how a test sees the cut land on
+// the DHT and nowhere else.
+
+// ctxIter yields vals and then blocks in Next until its context ends, at which
+// point it reports false and records that it saw the cancel. If blockAfter is
+// set it sleeps that long after yielding every record, before blocking, so a
+// test can make the router finish on its own schedule instead of at once.
+type ctxIter struct {
+	ctx        context.Context
+	vals       []iter.Result[types.Record]
+	blockAfter time.Duration
+	// blockUntilCancel makes Next, once the values are exhausted, wait on the
+	// context before returning false - modelling a DHT walk that keeps running
+	// until it is cancelled by the cut.
+	blockUntilCancel bool
+	i                int
+
+	sawCancel bool
+}
+
+var _ iter.ResultIter[types.Record] = (*ctxIter)(nil)
+
+func (c *ctxIter) Next() bool {
+	if c.i < len(c.vals) {
+		c.i++
+		return true
+	}
+	if c.blockAfter > 0 {
+		time.Sleep(c.blockAfter)
+		c.blockAfter = 0
+	}
+	if c.blockUntilCancel {
+		// Model a DHT walk that keeps running until the cut cancels it.
+		<-c.ctx.Done()
+		c.sawCancel = true
+		return false
+	}
+	// The iterator has run out. If the context is already done (the request
+	// ended, or a cut cancelled it), record that; otherwise return false so the
+	// router is seen to have exhausted on its own.
+	if c.ctx.Err() != nil {
+		c.sawCancel = true
+	}
+	return false
+}
+
+func (c *ctxIter) Val() iter.Result[types.Record] { return c.vals[c.i-1] }
+
+func (c *ctxIter) Close() error { return nil }
+
+// namedRouter is a router that find can fan out: it answers with one iterator
+// per operation and reports the context it was called with.
+type namedRouter struct {
+	name string
+
+	providers func(ctx context.Context) iter.ResultIter[types.Record]
+	peers     func(ctx context.Context) iter.ResultIter[*types.PeerRecord]
+	closest   func(ctx context.Context) iter.ResultIter[*types.PeerRecord]
+}
+
+var _ router = namedRouter{}
+
+// routerLabel reports the metric label for a namedRouter, so find's trace and
+// the someguy_router_* metrics carry the name the test gave it.
+func (r namedRouter) routerLabel() string { return r.name }
+
+// dhtTestRouter is a namedRouter that also satisfies dhtMarker, so find treats
+// it as the router a tail cut may cancel - the same role libp2pRouter plays in
+// production. Tests wrap it in sanitizeRouter the way combineRouters wraps the
+// production DHT, so the cut's unwrapRouter path is exercised rather than
+// bypassed.
+type dhtTestRouter struct {
+	namedRouter
+}
+
+var _ router = dhtTestRouter{}
+var _ dhtMarker = dhtTestRouter{}
+
+func (dhtTestRouter) isDHT() {}
+
+func (r namedRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
+	if r.providers == nil {
+		return nil, errors.New("no providers iterator")
+	}
+	return r.providers(ctx), nil
+}
+
+func (r namedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
+	if r.peers == nil {
+		return nil, errors.New("no peers iterator")
+	}
+	return r.peers(ctx), nil
+}
+
+func (r namedRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
+	if r.closest == nil {
+		return nil, errors.New("no closest iterator")
+	}
+	return r.closest(ctx), nil
+}
+
+func (r namedRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Record, error) {
+	return nil, routing.ErrNotFound
+}
+
+func (r namedRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.Record) error {
+	return nil
+}
+
+// cutFind runs one providers request through find with the given routers and
+// DHT tail budget, returning the manyIter it built. A single-router request
+// comes back as whatever that router returned, which is how a test asserts
+// the fan-out (and its timer) never happened.
+func cutFind(t *testing.T, routers []router, budget time.Duration) iter.ResultIter[types.Record] {
+	t.Helper()
+	r := parallelRouter{routers: routers, dhtTailBudget: budget}
+	it, err := r.FindProviders(t.Context(), cid.Undef, 0)
+	require.NoError(t, err)
+	return it
+}
+
+func TestDHTTailCutFires(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 200 * time.Millisecond
+	)
+
+	doneFastBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
+	fastRouterCtx := make(chan context.Context, 1)
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			fastRouterCtx <- ctx
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A"), peerRec("B"), peerRec("C")})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	start := time.Now()
+	it := cutFind(t, routers, budget)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	elapsed := time.Since(start)
+	want := []string{peer.ID("A").String(), peer.ID("B").String(), peer.ID("C").String(), peer.ID("D").String()}
+	require.ElementsMatch(t, want, got, "the DHT's early record is kept, nothing after the cut")
+
+	// The request ends about one budget after the fast router finished, not at
+	// the DHT walk's own timeout.
+	require.Greater(t, elapsed, budget)
+	require.Less(t, elapsed, budget+time.Second)
+
+	// The fast router's context was still live while it ran; only the DHT's
+	// was cancelled by the cut.
+	select {
+	case ctx := <-fastRouterCtx:
+		require.NoError(t, ctx.Err(), "the fast router's context must not be cancelled before it finished")
+	default:
+		t.Fatal("the fast router was never called with a context")
+	}
+	require.True(t, dhtIt.sawCancel, "the DHT saw its own context cancelled by the cut")
+
+	doneFastAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	require.Equal(t, uint64(1), doneFastAfter-doneFastBefore, "the fast router ran out: exhausted")
+	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut off")
+	require.Equal(t, uint64(0), doneDHTExcAfter-doneDHTExcBefore, "the DHT did not run out")
+
+	// The request-level trace reason is cut.
+	f := fieldsMap(t, mi.trace.traceFields(mi.trace.snapshot(), routerDoneCut))
+	require.Equal(t, routerDoneCut, f["reason"])
+	require.Equal(t, 3, f[fast+"_records"])
+	require.Equal(t, 1, f[dhtName+"_records"], "the DHT record that arrived before the cut is counted")
+}
+
+func TestDHTTailCutNotNeededWhenDHTFinishesInBudget(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 500 * time.Millisecond
+	)
+
+	doneFastBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 50 * time.Millisecond}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A")})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	start := time.Now()
+	it := cutFind(t, routers, budget)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	elapsed := time.Since(start)
+	require.ElementsMatch(t, []string{peer.ID("A").String(), peer.ID("D").String()}, got)
+
+	// The request ends when the DHT runs out, about 50 ms in: the timer was
+	// stopped and did not hold the response open to the budget.
+	require.Less(t, elapsed, 400*time.Millisecond)
+
+	require.False(t, dhtIt.sawCancel, "the DHT ran out on its own; nothing cancelled it")
+
+	doneFastAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneFastAfter-doneFastBefore)
+	require.Equal(t, uint64(1), doneDHTExcAfter-doneDHTExcBefore, "both routers exhausted")
+	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut observed")
+
+	f := fieldsMap(t, mi.trace.traceFields(mi.trace.snapshot(), routerDoneExhausted))
+	require.Equal(t, routerDoneExhausted, f["reason"])
+}
+
+func TestDHTTailBudgetZeroDisablesCut(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+	)
+
+	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 300 * time.Millisecond}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A")})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	start := time.Now()
+	it := cutFind(t, routers, 0)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	elapsed := time.Since(start)
+	require.ElementsMatch(t, []string{peer.ID("A").String(), peer.ID("D").String()}, got)
+
+	// No cut: the request ends when the DHT runs out, about 300 ms in.
+	require.GreaterOrEqual(t, elapsed, 250*time.Millisecond)
+	require.Less(t, elapsed, time.Second)
+	require.False(t, dhtIt.sawCancel)
+
+	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneDHTExcAfter-doneDHTExcBefore)
+	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore)
+
+	// No timer was ever armed.
+	mi.mu.Lock()
+	timer := mi.timer
+	mi.mu.Unlock()
+	require.Nil(t, timer, "budget 0 builds no timer")
+}
+
+func TestDHTTailCutNeverFiresWithoutNonDHTRouter(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		dhtName = "dht"
+		budget  = 200 * time.Millisecond
+	)
+
+	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 100 * time.Millisecond}
+	// Two routers, both the DHT: nothing is left to cut. The other shape of
+	// this case - a delegated router whose call errors and is dropped from its
+	// - is covered by TestFindSingleRouterPath.
+	routers := []router{
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("E")})
+		}}}},
+	}
+
+	it := cutFind(t, routers, budget)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	require.ElementsMatch(t, []string{peer.ID("D").String(), peer.ID("E").String()}, got)
+	require.False(t, dhtIt.sawCancel, "a request with no non-DHT router is never cut")
+
+	// Both routers share the "dht" label, so each of their exhaustions lands on
+	// the same series.
+	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(2), doneDHTExcAfter-doneDHTExcBefore, "both DHT routers ran out")
+	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore)
+
+	mi.mu.Lock()
+	timer := mi.timer
+	mi.mu.Unlock()
+	require.Nil(t, timer, "no non-cuttable router: no timer is armed")
+}
+
+func TestDHTTailCutRecordsLimitWinsOverCut(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 300 * time.Millisecond
+	)
+
+	doneDHTCancelledBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCancelled})
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("A"), peerRec("B")}}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("C"), peerRec("D")})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	it := cutFind(t, routers, budget)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	// Two records is the limit: Close while the DHT is still inside its budget.
+	for range 2 {
+		require.True(t, it.Next())
+	}
+	require.NoError(t, mi.Close())
+
+	// The cut timer must not fire after Close: a late cancel would show up as
+	// the DHT's context ending with no one to read it.
+	cutFired := make(chan struct{})
+	go func() {
+		select {
+		case <-dhtIt.ctx.Done():
+			close(cutFired)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}()
+	require.Eventually(t, func() bool {
+		select {
+		case <-cutFired:
+			return true
+		default:
+			return false
+		}
+	}, 600*time.Millisecond, time.Millisecond, "the DHT's context ends when Close cancels it")
+
+	doneDHTCancelledAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCancelled})
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneDHTCancelledAfter-doneDHTCancelledBefore, "the DHT was cancelled by the records limit")
+	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "not cut: the request ended before the budget ran out")
+
+	// Close stopped the timer, so it is no longer pending; a second Stop cannot
+	// report success. This is the observable form of "the cut will not fire
+	// after the response is written".
+	mi.mu.Lock()
+	timer := mi.timer
+	stillPending := timer != nil && timer.Stop()
+	mi.mu.Unlock()
+	require.False(t, stillPending, "Close stopped the cut timer; it cannot fire late")
+}
+
+// TestDHTTailCutCloseRacesTimer exercises the one shape the other five tests do
+// not cover: a cuttable router blocked inside Next on its per-router context,
+// woken by Close cancelling mi.ctx, reads the cut flag from the ctx.Done arm
+// while the timer callback may still be writing it. Before finding #4 the flag
+// was a plain bool guarded by manyIter.mu on the write side but read with no
+// lock, so -race reported it. The fix makes it an atomic.Bool.
+func TestDHTTailCutCloseRacesTimer(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 50 * time.Millisecond
+	)
+
+	// The DHT yields one record then blocks until its context ends, modelling a
+	// walk that keeps running. The fast router yields nothing and finishes at
+	// once, which arms the cut timer.
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	it := cutFind(t, routers, budget)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	// Read the one record the DHT produced, then Close while the DHT is still
+	// blocked in Next. The fast router has already finished, so the cut timer is
+	// armed; Close races it. -race watches the cut flag across that race.
+	require.True(t, it.Next())
+	require.NoError(t, mi.Close())
+
+	require.True(t, dhtIt.sawCancel, "the DHT saw its context end")
+}
+
+func TestFindSingleRouterPath(t *testing.T) {
+	const (
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+	)
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A")})
+		}},
+		// The delegated router's call errors and is dropped from its, leaving
+		// the DHT alone: a request with no non-DHT router must never cut.
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	// One working router: find returns its iterator directly and never builds
+	// a manyIter, so there is no timer to build. The record must survive the
+	// single-router path - finding #2 was a context cancel that tore it down
+	// before any record was read.
+	single := cutFind(t, []router{routers[0]}, 200*time.Millisecond)
+	var got []string
+	require.NotPanics(t, func() {
+		for single.Next() {
+			got = append(got, single.Val().Val.(*types.PeerRecord).ID.String())
+		}
+	})
+	_, isMany := single.(*manyIter[types.Record])
+	require.False(t, isMany, "a single-router request does not fan out")
+	require.Equal(t, []string{peer.ID("A").String()}, got, "the single router's record survives the path")
+
+	// The dropped-router shape of the same case: two routers configured, one
+	// whose call fails, so its is only the DHT.
+	dropped := []router{
+		namedRouter{name: fast, providers: nil}, // errors in FindProviders
+		routers[1],
+	}
+	it := cutFind(t, dropped, 200*time.Millisecond)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+	got = nil
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	require.Equal(t, []string{peer.ID("D").String()}, got)
+	require.False(t, dhtIt.sawCancel, "no non-DHT router in its: no cut")
+
+	mi.mu.Lock()
+	timer := mi.timer
+	mi.mu.Unlock()
+	require.Nil(t, timer, "no non-cuttable iterator: no timer is armed")
+}
+
+func TestCombineRoutersDHTTailBudget(t *testing.T) {
+	mockRouter := composableRouter{}
+
+	// The budget reaches the parallelRouter combineRouters builds.
+	v := combineRouters(nil, &bundledDHT{}, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 500*time.Millisecond)
+	require.IsType(t, parallelRouter{}, v)
+	require.Equal(t, 500*time.Millisecond, v.(parallelRouter).dhtTailBudget)
+
+	// A zero budget is the default and disables the cut.
+	v = combineRouters(nil, &bundledDHT{}, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 0)
+	require.IsType(t, parallelRouter{}, v)
+	require.Equal(t, time.Duration(0), v.(parallelRouter).dhtTailBudget)
+}
+
+// TestWrappedDHTRouterIsCuttable pins the assertion finding #1 rests on: the
+// router combineRouters actually builds - a libp2pRouter wrapped in
+// sanitizeRouter (and cachedRouter when the address book is on) - must be
+// recognised as cuttable by unwrapRouter. Without this, a future wrapper can
+// silently re-break the cut.
+func TestWrappedDHTRouterIsCuttable(t *testing.T) {
+	// The production shape: libp2pRouter wrapped in sanitizeRouter.
+	wrapped := sanitizeRouter{router: libp2pRouter{}}
+	_, isDHT := unwrapRouter(wrapped).(dhtMarker)
+	require.True(t, isDHT, "sanitizeRouter{libp2pRouter} must be recognised as the DHT")
+
+	// The address-book-on shape: libp2pRouter wrapped in cachedRouter, then
+	// sanitizeRouter.
+	cached := cachedRouter{router: libp2pRouter{}}
+	doubleWrapped := sanitizeRouter{router: cached}
+	_, isDHT = unwrapRouter(doubleWrapped).(dhtMarker)
+	require.True(t, isDHT, "sanitizeRouter{cachedRouter{libp2pRouter}} must be recognised as the DHT")
+
+	// The label agrees with the marker: both see past the wrappers.
+	require.Equal(t, "dht", routerName(wrapped), "the metric label and the cut must agree on what is the DHT")
 }
