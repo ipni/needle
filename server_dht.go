@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/ipfs/boxo/ipns"
 	"github.com/ipfs/go-cid"
@@ -19,7 +20,20 @@ type bundledDHT struct {
 	fullRT   *fullrt.FullRT
 }
 
-func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo) (routing.Routing, error) {
+const (
+	// DefaultFindPeerGrace mirrors the accelerated client's own default for how
+	// long it keeps querying after the first peer reports a FindPeer target.
+	// Peers close to the target answer at nearly the same time, so a short grace
+	// collects their reports and then cuts the slow ones.
+	DefaultFindPeerGrace = 500 * time.Millisecond
+	// DefaultFindPeerDialTimeout mirrors the accelerated client's own default
+	// budget for the background dial it starts after answering a FindPeer. The
+	// dial only lets identify refine the addresses for later callers; it does
+	// not gate the answer.
+	DefaultFindPeerDialTimeout = 5 * time.Second
+)
+
+func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo, findPeerGrace, findPeerDialTimeout time.Duration) (routing.Routing, error) {
 	standardDHT, err := dht.New(h, dht.Mode(dht.ModeClient), dht.BootstrapPeers(bootstrapAddrInfos...))
 	if err != nil {
 		return nil, err
@@ -34,7 +48,9 @@ func newBundledDHT(h host.Host, bootstrapAddrInfos []peer.AddrInfo) (routing.Rou
 			}),
 			dht.BootstrapPeers(bootstrapAddrInfos...),
 			dht.Mode(dht.ModeClient),
-		))
+		),
+		fullrt.WithFindPeerGrace(findPeerGrace),
+		fullrt.WithFindPeerDialTimeout(findPeerDialTimeout))
 	if err != nil {
 		return nil, err
 	}

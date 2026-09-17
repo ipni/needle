@@ -42,6 +42,20 @@ func main() {
 						EnvVars: []string{"SOMEGUY_DHT"},
 						Usage:   "Amino DHT client mode: 'accelerated', 'standard', or 'disabled'",
 					},
+					&cli.DurationFlag{
+						Name:        "dht-find-peer-grace",
+						DefaultText: DefaultFindPeerGrace.String(),
+						Value:       DefaultFindPeerGrace,
+						EnvVars:     []string{"SOMEGUY_DHT_FIND_PEER_GRACE"},
+						Usage:       "how long the accelerated DHT client keeps querying after the first peer reports a FindPeer target; 0 waits for every queried peer",
+					},
+					&cli.DurationFlag{
+						Name:        "dht-find-peer-dial-timeout",
+						DefaultText: DefaultFindPeerDialTimeout.String(),
+						Value:       DefaultFindPeerDialTimeout,
+						EnvVars:     []string{"SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT"},
+						Usage:       "budget for the background dial the accelerated DHT client starts after a FindPeer answer; 0 disables the dial. someguy caches addresses itself, so 0 is reasonable",
+					},
 					&cli.BoolFlag{
 						Name:    "cached-addr-book",
 						Value:   true,
@@ -262,6 +276,14 @@ func main() {
 					if dhtTailBudget < 0 {
 						return fmt.Errorf("dht-tail-budget must be non-negative, got %s (0 disables)", dhtTailBudget)
 					}
+					findPeerGrace := ctx.Duration("dht-find-peer-grace")
+					if findPeerGrace < 0 {
+						return fmt.Errorf("dht-find-peer-grace must be non-negative, got %s (0 waits for every queried peer)", findPeerGrace)
+					}
+					findPeerDialTimeout := ctx.Duration("dht-find-peer-dial-timeout")
+					if findPeerDialTimeout < 0 {
+						return fmt.Errorf("dht-find-peer-dial-timeout must be non-negative, got %s (0 disables the dial)", findPeerDialTimeout)
+					}
 					snapshotPath, snapshotInterval, err := snapshotFlagConfig(ctx.String("datadir"), ctx.Bool("cached-addr-book"), ctx.String("dht"), ctx.Duration("cached-addr-book-snapshot-interval"))
 					if err != nil {
 						return err
@@ -269,6 +291,8 @@ func main() {
 					cfg := &config{
 						listenAddress:                  ctx.String("listen-address"),
 						dhtType:                        ctx.String("dht"),
+						findPeerGrace:                  findPeerGrace,
+						findPeerDialTimeout:            findPeerDialTimeout,
 						cachedAddrBook:                 ctx.Bool("cached-addr-book"),
 						cachedAddrBookActiveProbing:    ctx.Bool("cached-addr-book-active-probing"),
 						cachedAddrBookRecentTTL:        ctx.Duration("cached-addr-book-recent-ttl"),
@@ -316,6 +340,12 @@ func main() {
 					}
 					if cfg.cachedAddrBookNegativeTTL > 0 {
 						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL = %s\n", cfg.cachedAddrBookNegativeTTL)
+					}
+					if cfg.findPeerGrace != DefaultFindPeerGrace {
+						fmt.Printf("SOMEGUY_DHT_FIND_PEER_GRACE = %s\n", cfg.findPeerGrace)
+					}
+					if cfg.findPeerDialTimeout != DefaultFindPeerDialTimeout {
+						fmt.Printf("SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT = %s\n", cfg.findPeerDialTimeout)
 					}
 					if cfg.pprof {
 						fmt.Printf("SOMEGUY_PPROF = true\n")

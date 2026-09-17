@@ -5,6 +5,8 @@ The environment variables below override `someguy`'s built-in defaults.
 - [Configuration](#configuration)
   - [`SOMEGUY_LISTEN_ADDRESS`](#someguy_listen_address)
   - [`SOMEGUY_DHT`](#someguy_dht)
+  - [`SOMEGUY_DHT_FIND_PEER_GRACE`](#someguy_dht_find_peer_grace)
+  - [`SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT`](#someguy_dht_find_peer_dial_timeout)
   - [`SOMEGUY_CACHED_ADDR_BOOK`](#someguy_cached_addr_book)
   - [`SOMEGUY_CACHED_ADDR_BOOK_RECENT_TTL`](#someguy_cached_addr_book_recent_ttl)
   - [`SOMEGUY_CACHED_ADDR_BOOK_ACTIVE_PROBING`](#someguy_cached_addr_book_active_probing)
@@ -55,6 +57,26 @@ Default: `127.0.0.1:8190`
 Controls DHT client mode: `standard`, `accelerated`, `disabled`
 
 Default: `accelerated`
+
+### `SOMEGUY_DHT_FIND_PEER_GRACE`
+
+How long the accelerated DHT client keeps querying after the first peer reports a `FindPeer` target, before cancelling the query and answering. Peers close to the target answer at nearly the same time, so a short grace collects the duplicates and alternate addresses they report and then cuts off the peers that are still slow, instead of waiting out `SOMEGUY_ROUTING_TIMEOUT` on them.
+
+The trade-off: an address known only to a peer that answers later than the grace is dropped. In practice those late reports rarely differ from the first. Set `0` to disable the early exit and wait for every queried peer, which restores the pre-fork timing.
+
+Applies only when `SOMEGUY_DHT` is `accelerated`. This is the library default, so leaving it unset already gets the behaviour.
+
+Default: `500ms`
+
+### `SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT`
+
+Budget for the background dial the accelerated DHT client starts once a `FindPeer` query has reported the target's addresses. The dial does not gate the answer: Someguy returns the reported addresses immediately and dials afterwards, purely so identify can refine those addresses in the peerstore for later callers.
+
+Someguy maintains its own cached address book, refreshed by identify on its own connections and by active probing, so that refinement is largely redundant here. Set `0` to disable the dial entirely and avoid one dial attempt per `FindPeer` for an unreachable target; the reported addresses are still returned and recorded.
+
+Applies only when `SOMEGUY_DHT` is `accelerated`. The client bounds these dials to 64 in flight regardless of this setting, skipping rather than queueing beyond that.
+
+Default: `5s`
 
 ### `SOMEGUY_CACHED_ADDR_BOOK`
 

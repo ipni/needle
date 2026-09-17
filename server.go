@@ -112,6 +112,8 @@ const (
 type config struct {
 	listenAddress                  string
 	dhtType                        string
+	findPeerGrace                  time.Duration
+	findPeerDialTimeout            time.Duration
 	cachedAddrBook                 bool
 	cachedAddrBookActiveProbing    bool
 	cachedAddrBookRecentTTL        time.Duration
@@ -227,7 +229,7 @@ func start(ctx context.Context, cfg *config) error {
 	var dhtRouting routing.Routing
 	switch cfg.dhtType {
 	case "accelerated":
-		wrappedDHT, err := newBundledDHT(h, bootstrapAddrInfos)
+		wrappedDHT, err := newBundledDHT(h, bootstrapAddrInfos, cfg.findPeerGrace, cfg.findPeerDialTimeout)
 		if err != nil {
 			return err
 		}
