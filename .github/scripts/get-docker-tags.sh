@@ -41,6 +41,18 @@ echoImageName () {
 if [[ $GIT_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc ]]; then
   echoImageName "$GIT_TAG"
 
+# This fork's own releases, vX.Y.Z-ipni.N, where vX.Y.Z is the upstream release
+# the fork sits on. Without this they fall through to the else below and the
+# build fails, because the "Nothing to do" line becomes the tags: input to
+# docker/build-push-action.
+#
+# Deliberately no "latest": in semver everything after the hyphen is a
+# prerelease, so vX.Y.Z-ipni.N sorts BEFORE vX.Y.Z, and pointing latest at it
+# would advertise the fork build as older than the upstream release it is
+# actually ahead of. Consumers pin the exact tag or a digest.
+elif [[ $GIT_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+-ipni\.[0-9]+$ ]]; then
+  echoImageName "$GIT_TAG"
+
 elif [[ $GIT_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echoImageName "$GIT_TAG"
   echoImageName "latest"
