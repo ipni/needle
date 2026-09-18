@@ -295,7 +295,7 @@ func (cab *cachedAddrBook) saveSnapshotLocked(connected func(peer.ID) bool) (err
 // addresses get recentlyConnectedTTL minus the age, relay addresses get
 // relayAddrTTL minus the age, and an addr whose TTL has already run out is
 // dropped. Restored addrs are unsigned: the next identify's ConsumePeerRecord
-// replaces them, and nothing in someguy reads certifications, so signed
+// replaces them, and nothing in needle reads certifications, so signed
 // envelopes are deliberately not persisted.
 //
 // pstoremem.AddAddrs drops unconnected addrs silently once the book holds

@@ -34,7 +34,7 @@ const (
 
 	// DNSAddrCacheTTL is how long a resolved set is reused. madns discards the
 	// DNS TTL, so this is a fixed value rather than the record's own. Observed
-	// dnsaddr TXT TTLs are 300-600s, and this matches the max-age someguy puts
+	// dnsaddr TXT TTLs are 300-600s, and this matches the max-age needle puts
 	// on a response with results.
 	DNSAddrCacheTTL = 5 * time.Minute
 
@@ -52,7 +52,7 @@ const (
 
 	// MaxDNSAddrLookupsPerRequest caps how many DNS lookups one request may
 	// trigger. Provider records are published by anyone, so without this a
-	// single request could name thousands of hostnames and turn someguy into a
+	// single request could name thousands of hostnames and turn needle into a
 	// relay for DNS floods. Cached names are free and do not count against it.
 	// Past the cap the address passes through unresolved.
 	MaxDNSAddrLookupsPerRequest = 16
@@ -382,7 +382,7 @@ func (d *dnsAddrResolver) expand(ctx context.Context, pid peer.ID, addr ma.Multi
 
 // splitPeerID returns the /p2p component of addr, if any, and addr without it.
 // The peer ID is dropped because the record already carries it in its own ID
-// field, and every other address someguy returns omits it.
+// field, and every other address needle returns omits it.
 func splitPeerID(addr ma.Multiaddr) (peer.ID, ma.Multiaddr) {
 	rest, last := ma.SplitLast(addr)
 	if last == nil || last.Protocol().Code != ma.P_P2P {
@@ -428,7 +428,7 @@ func appendUnique(out *[]types.Multiaddr, seen map[string]struct{}, addr ma.Mult
 	return true
 }
 
-// DNSAddrResolution controls when someguy resolves a /dnsaddr and what an
+// DNSAddrResolution controls when needle resolves a /dnsaddr and what an
 // unfiltered response does with the original: each mode is named after that.
 // A request that sends filter-addrs always gets the /dnsaddr replaced in the
 // resolving modes, because a filter cannot match one; see addrFilter.action
@@ -507,7 +507,7 @@ func (f addrFilter) action() dnsAddrAction {
 // withAddrFilter records the request's filter-addrs so the routers can see it.
 //
 // The /routing/v1 handler parses filter-addrs and applies it to whatever the
-// router returns, without telling the router anything, so someguy reads the
+// router returns, without telling the router anything, so needle reads the
 // query itself and passes the value down the request context. That context is
 // the one the handler hands to the router, so the value arrives intact.
 //

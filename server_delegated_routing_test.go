@@ -150,10 +150,10 @@ func (f providersRouterFunc) PutIPNS(context.Context, ipns.Name, *ipns.Record) e
 	return fmt.Errorf("not implemented")
 }
 
-// TestProvidersLimitsHonorSpecCap verifies the boxo-based fix: someguy
+// TestProvidersLimitsHonorSpecCap verifies the boxo-based fix: needle
 // passes recordsLimit / streamingRecordsLimit to the boxo server, which
 // caps the response itself and calls the underlying router with 0
-// (unbounded). someguy needs no over-fetch logic of its own.
+// (unbounded). needle needs no over-fetch logic of its own.
 func TestProvidersLimitsHonorSpecCap(t *testing.T) {
 	t.Parallel()
 

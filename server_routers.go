@@ -215,7 +215,7 @@ var (
 	}, []string{"op"})
 )
 
-// The outcomes for someguy_router_tail_held{outcome}: how a below-floor hold
+// The outcomes for needle_router_tail_held{outcome}: how a below-floor hold
 // ended. crossed is the success case - the DHT found enough while held open;
 // exhausted is the bounded cut after maxTailHolds holds; finished is the
 // request ending before either (records limit, client gone).
@@ -647,7 +647,7 @@ type manyIter[T any] struct {
 // maxTailHolds bounds how many times a below-floor fire may hold the DHT open
 // before the cut fires anyway. It caps the worst-case extra time the floor adds
 // to a request: (maxTailHolds + 1) budgets after the last non-DHT router
-// finishes, i.e. at most 9 x SOMEGUY_DHT_TAIL_BUDGET. A request that never
+// finishes, i.e. at most 9 x NEEDLE_DHT_TAIL_BUDGET. A request that never
 // reaches the floor therefore still ends on its own schedule rather than living
 // indefinitely.
 const maxTailHolds = 8
@@ -1434,7 +1434,7 @@ func addrSortRank(addr ma.Multiaddr) int {
 //
 // It wraps each whole composed router rather than sitting next to
 // sanitizeRouter, because sanitizeRouter only covers the DHT branch while
-// /dnsaddr records reach someguy from delegated HTTP routers.
+// /dnsaddr records reach needle from delegated HTTP routers.
 type dnsAddrRouter struct {
 	router
 	resolver *dnsAddrResolver

@@ -75,7 +75,7 @@ const (
 	probeResultOffline = "offline"
 )
 
-// DefaultRelayAddrTTL bounds how long someguy serves a cached /p2p-circuit
+// DefaultRelayAddrTTL bounds how long needle serves a cached /p2p-circuit
 // (relay) address. A relay reservation lasts at most the relay's reservation
 // TTL (relay.DefaultResources().ReservationTTL) and is dropped the instant the
 // reserving peer disconnects from the relay, so a relay address is far more
@@ -122,7 +122,7 @@ type peerState struct {
 }
 
 type cachedAddrBook struct {
-	addrBook             peerstore.AddrBook             // someguy's own address book: durable, probed, written here
+	addrBook             peerstore.AddrBook             // needle's own address book: durable, probed, written here
 	hostPeerstore        peerstore.AddrBook             // libp2p host peerstore, DHT-populated, read-only fallback
 	peerCache            *lru.Cache[peer.ID, peerState] // LRU cache with additional metadata about peer
 	probingEnabled       bool
@@ -147,7 +147,7 @@ type AddrBookOption func(*cachedAddrBook) error
 // WithHostPeerstore lets GetCachedAddrs fall back to the libp2p host peerstore,
 // which go-libp2p-kad-dht populates with provider addresses during
 // FindProviders (under a short TempAddrTTL). This catches peers seen very
-// recently as providers that have not yet been copied into someguy's own
+// recently as providers that have not yet been copied into needle's own
 // longer-lived address book.
 func WithHostPeerstore(ps peerstore.AddrBook) AddrBookOption {
 	return func(cab *cachedAddrBook) error {

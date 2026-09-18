@@ -891,7 +891,7 @@ func counterVal(t *testing.T, c *prometheus.CounterVec, lv ...string) float64 {
 	return testutil.ToFloat64(c.WithLabelValues(lv...))
 }
 
-// heldVal reads the someguy_router_tail_held{op,outcome} series. The held
+// heldVal reads the needle_router_tail_held{op,outcome} series. The held
 // metrics are observed once per request that actually held (not once per fire),
 // so a test asserts an exact delta against this rather than counting fires.
 func heldVal(t *testing.T, op, outcome string) float64 {
@@ -954,12 +954,12 @@ func TestRouterTimingExhausted(t *testing.T) {
 	recSlowBefore := counterVal(t, routerRecords, op, slow)
 	excBefore := counterVal(t, routerExclusiveRecords, op, fast)
 	excSlowBefore := counterVal(t, routerExclusiveRecords, op, slow)
-	firstBefore, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": fast})
-	firstSlowBefore, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": slow})
-	doneBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneSlowBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneExhausted})
-	tailBefore, tailSumBefore := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": slow})
-	tailFastBefore, _ := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": fast})
+	firstBefore, _ := histVal(t, "needle_router_first_result_seconds", map[string]string{"op": op, "router": fast})
+	firstSlowBefore, _ := histVal(t, "needle_router_first_result_seconds", map[string]string{"op": op, "router": slow})
+	doneBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneExhausted})
+	tailBefore, tailSumBefore := histVal(t, "needle_router_tail_seconds", map[string]string{"router": slow})
+	tailFastBefore, _ := histVal(t, "needle_router_tail_seconds", map[string]string{"router": fast})
 	lastBefore := counterVal(t, routerLastFinisher, slow)
 
 	// "C" is produced by both routers, so it is exclusive to neither.
@@ -981,20 +981,20 @@ func TestRouterTimingExhausted(t *testing.T) {
 	require.Equal(t, 2.0, counterVal(t, routerExclusiveRecords, op, fast)-excBefore)
 	require.Equal(t, 1.0, counterVal(t, routerExclusiveRecords, op, slow)-excSlowBefore)
 
-	firstAfter, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": fast})
-	firstSlowAfter, _ := histVal(t, "someguy_router_first_result_seconds", map[string]string{"op": op, "router": slow})
+	firstAfter, _ := histVal(t, "needle_router_first_result_seconds", map[string]string{"op": op, "router": fast})
+	firstSlowAfter, _ := histVal(t, "needle_router_first_result_seconds", map[string]string{"op": op, "router": slow})
 	require.Equal(t, uint64(1), firstAfter-firstBefore, "first result observed once per router that produced")
 	require.Equal(t, uint64(1), firstSlowAfter-firstSlowBefore)
 
-	doneAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneSlowAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneExhausted})
+	doneAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneExhausted})
 	require.Equal(t, uint64(1), doneAfter-doneBefore)
 	require.Equal(t, uint64(1), doneSlowAfter-doneSlowBefore)
 
 	// The tail belongs to the slow router alone, and is about the delay: the
 	// fast one was finished before the slow one produced anything.
-	tailAfter, tailSumAfter := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": slow})
-	tailFastAfter, _ := histVal(t, "someguy_router_tail_seconds", map[string]string{"router": fast})
+	tailAfter, tailSumAfter := histVal(t, "needle_router_tail_seconds", map[string]string{"router": slow})
+	tailFastAfter, _ := histVal(t, "needle_router_tail_seconds", map[string]string{"router": fast})
 	require.Equal(t, uint64(1), tailAfter-tailBefore)
 	require.Equal(t, uint64(0), tailFastAfter-tailFastBefore)
 	tail := tailSumAfter - tailSumBefore
@@ -1021,8 +1021,8 @@ func TestRouterTimingCancelled(t *testing.T) {
 		slow = "dht"
 	)
 
-	doneBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneSlowBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneCancelled})
+	doneBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneCancelled})
 	lastBefore := counterVal(t, routerLastFinisher, slow)
 	excBefore := counterVal(t, routerExclusiveRecords, op, slow)
 
@@ -1048,8 +1048,8 @@ func TestRouterTimingCancelled(t *testing.T) {
 	require.Eventually(t, func() bool { return trace.snapshot().finished == 1 }, time.Second, time.Millisecond)
 	require.NoError(t, mi.Close())
 
-	doneAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneSlowAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneCancelled})
+	doneAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneSlowAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": slow, "reason": routerDoneCancelled})
 	require.Equal(t, uint64(1), doneAfter-doneBefore, "the router that ran out is exhausted, not cancelled")
 	require.Equal(t, uint64(1), doneSlowAfter-doneSlowBefore, "the router still running when Close cancelled is cancelled")
 
@@ -1210,7 +1210,7 @@ type namedRouter struct {
 var _ router = namedRouter{}
 
 // routerLabel reports the metric label for a namedRouter, so find's trace and
-// the someguy_router_* metrics carry the name the test gave it.
+// the needle_router_* metrics carry the name the test gave it.
 func (r namedRouter) routerLabel() string { return r.name }
 
 // dhtTestRouter is a namedRouter that also satisfies dhtMarker, so find treats
@@ -1325,9 +1325,9 @@ func TestDHTTailCutFires(t *testing.T) {
 		budget  = 200 * time.Millisecond
 	)
 
-	doneFastBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
-	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneFastBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
 	fastRouterCtx := make(chan context.Context, 1)
@@ -1370,9 +1370,9 @@ func TestDHTTailCutFires(t *testing.T) {
 	}
 	require.True(t, dhtIt.sawCancel, "the DHT saw its own context cancelled by the cut")
 
-	doneFastAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
-	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneFastAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
 	require.Equal(t, uint64(1), doneFastAfter-doneFastBefore, "the fast router ran out: exhausted")
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut off")
 	require.Equal(t, uint64(0), doneDHTExcAfter-doneDHTExcBefore, "the DHT did not run out")
@@ -1392,9 +1392,9 @@ func TestDHTTailCutNotNeededWhenDHTFinishesInBudget(t *testing.T) {
 		budget  = 500 * time.Millisecond
 	)
 
-	doneFastBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneFastBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTExcBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 50 * time.Millisecond}
 	routers := []router{
@@ -1425,9 +1425,9 @@ func TestDHTTailCutNotNeededWhenDHTFinishesInBudget(t *testing.T) {
 
 	require.False(t, dhtIt.sawCancel, "the DHT ran out on its own; nothing cancelled it")
 
-	doneFastAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
-	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneFastAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": fast, "reason": routerDoneExhausted})
+	doneDHTExcAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneFastAfter-doneFastBefore)
 	require.Equal(t, uint64(1), doneDHTExcAfter-doneDHTExcBefore, "both routers exhausted")
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut observed")
@@ -1443,8 +1443,8 @@ func TestDHTTailBudgetZeroDisablesCut(t *testing.T) {
 		dhtName = "dht"
 	)
 
-	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 300 * time.Millisecond}
 	routers := []router{
@@ -1474,8 +1474,8 @@ func TestDHTTailBudgetZeroDisablesCut(t *testing.T) {
 	require.Less(t, elapsed, time.Second)
 	require.False(t, dhtIt.sawCancel)
 
-	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTExcAfter-doneDHTExcBefore)
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore)
 
@@ -1493,8 +1493,8 @@ func TestDHTTailCutNeverFiresWithoutNonDHTRouter(t *testing.T) {
 		budget  = 200 * time.Millisecond
 	)
 
-	doneDHTExcBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 100 * time.Millisecond}
 	// Two routers, both the DHT: nothing is left to cut. The other shape of
@@ -1523,8 +1523,8 @@ func TestDHTTailCutNeverFiresWithoutNonDHTRouter(t *testing.T) {
 
 	// Both routers share the "dht" label, so each of their exhaustions lands on
 	// the same series.
-	doneDHTExcAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTExcAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneExhausted})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(2), doneDHTExcAfter-doneDHTExcBefore, "both DHT routers ran out")
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore)
 
@@ -1542,8 +1542,8 @@ func TestDHTTailCutRecordsLimitWinsOverCut(t *testing.T) {
 		budget  = 300 * time.Millisecond
 	)
 
-	doneDHTCancelledBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCancelled})
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCancelledBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCancelled})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("A"), peerRec("B")}}
 	routers := []router{
@@ -1585,8 +1585,8 @@ func TestDHTTailCutRecordsLimitWinsOverCut(t *testing.T) {
 		}
 	}, 600*time.Millisecond, time.Millisecond, "the DHT's context ends when Close cancels it")
 
-	doneDHTCancelledAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCancelled})
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCancelledAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCancelled})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCancelledAfter-doneDHTCancelledBefore, "the DHT was cancelled by the records limit")
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "not cut: the request ended before the budget ran out")
 
@@ -1664,7 +1664,7 @@ func TestDHTTailFloorZeroIdentical(t *testing.T) {
 	)
 
 	heldBefore := heldVal(t, op, tailHeldOutcomeFinished)
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{}, blockUntilCancel: true}
 	routers := []router{
@@ -1694,7 +1694,7 @@ func TestDHTTailFloorZeroIdentical(t *testing.T) {
 	require.Less(t, elapsed, budget+time.Second)
 	require.True(t, dhtIt.sawCancel, "the DHT was cut on the first fire")
 
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
 	// The floor is at 0, so no fire held the DHT open: the held metric is
 	// untouched. This is the observable form of "byte-identical to before".
@@ -1715,7 +1715,7 @@ func TestDHTTailFloorHoldsBelowFloor(t *testing.T) {
 	)
 
 	heldBefore := heldVal(t, op, tailHeldOutcomeFinished)
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	// The DHT delivers one record, then blocks until cancelled - it never runs
 	// out on its own. distinct stays at 1 < floor 2 for the whole request, so
@@ -1754,7 +1754,7 @@ func TestDHTTailFloorHoldsBelowFloor(t *testing.T) {
 	require.NoError(t, mi.Close())
 	require.True(t, dhtIt.sawCancel, "the DHT saw its context end (from Close, not a cut)")
 
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut: the DHT was held open on every fire")
 	// The hold is observed out exactly once, when Close ends it - not once per
 	// fire - and its outcome is finished (the request ended before the floor was
@@ -1774,7 +1774,7 @@ func TestDHTTailFloorCutsAtFloor(t *testing.T) {
 	)
 
 	heldBefore := heldVal(t, op, tailHeldOutcomeCrossed)
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
 	routers := []router{
@@ -1803,7 +1803,7 @@ func TestDHTTailFloorCutsAtFloor(t *testing.T) {
 	require.Less(t, elapsed, budget+time.Second)
 	require.True(t, dhtIt.sawCancel, "the DHT was cut at the floor")
 
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
 	// No hold: the request was already at the floor when the first fire landed,
 	// so nothing held and the crossed series is untouched.
@@ -1823,7 +1823,7 @@ func TestDHTTailFloorCrossesMidWindow(t *testing.T) {
 	)
 
 	heldBefore := heldVal(t, op, tailHeldOutcomeCrossed)
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	// The DHT delivers one record at once, then waits 300 ms before the second.
 	// The first fire lands at ~200 ms (distinct=1 < floor 2: hold). The second
@@ -1855,7 +1855,7 @@ func TestDHTTailFloorCrossesMidWindow(t *testing.T) {
 	// The DHT was cut on the second fire, after the mid-window cross.
 	require.True(t, dhtIt.sawCancel, "the DHT was cut on the second fire")
 
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
 	// The hold ended when the second fire crossed the floor: one observation in
 	// the crossed series, not one per fire.
@@ -1875,7 +1875,7 @@ func TestDHTTailFloorBoundIsFinite(t *testing.T) {
 	)
 
 	heldBefore := heldVal(t, op, tailHeldOutcomeExhausted)
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{}, blockUntilCancel: true}
 	routers := []router{
@@ -1906,7 +1906,7 @@ func TestDHTTailFloorBoundIsFinite(t *testing.T) {
 	require.Less(t, elapsed, time.Duration(maxTailHolds+2)*budget+time.Second)
 	require.True(t, dhtIt.sawCancel, "the DHT was cut once the holds were exhausted")
 
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut at the bound")
 	// The hold ran out of holds before crossing the floor: one observation in
 	// the exhausted series, not maxTailHolds.
@@ -1924,7 +1924,7 @@ func TestDHTTailFloorNeverArmsWithoutNonDHTRouter(t *testing.T) {
 	)
 
 	heldBefore := heldVal(t, op, tailHeldOutcomeFinished)
-	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutBefore, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 150 * time.Millisecond}
 	routers := []router{
@@ -1948,7 +1948,7 @@ func TestDHTTailFloorNeverArmsWithoutNonDHTRouter(t *testing.T) {
 	require.ElementsMatch(t, []string{peer.ID("D").String(), peer.ID("E").String()}, got)
 	require.False(t, dhtIt.sawCancel, "a DHT-only request is never cut, at any floor")
 
-	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	doneDHTCutAfter, _ := histVal(t, "needle_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut")
 	require.Equal(t, heldBefore, heldVal(t, op, tailHeldOutcomeFinished), "no hold: the timer was never armed")
 

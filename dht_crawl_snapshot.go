@@ -12,7 +12,7 @@
 // each of its peers hands fullrt a full table in seconds, with no network
 // activity.
 //
-// One thing stands in the way of that, and it is why someguy pins the ipni
+// One thing stands in the way of that, and it is why needle pins the ipni
 // fork of go-libp2p-kad-dht. fullrt runs every peer the crawler reports through
 // a route table filter, whose default keeps a peer only while the host has an
 // open connection to it - true of a peer the crawler just dialled, never true
@@ -107,7 +107,7 @@ const crawlReplayAddrTTL = 10 * time.Minute
 const crawlSnapshotTempPattern = ".dht-crawl-*.tmp"
 
 // crawlSubsystem is the metric subsystem for everything in this file:
-// someguy_dht_crawl_*.
+// needle_dht_crawl_*.
 const crawlSubsystem = "dht_crawl"
 
 const (
@@ -181,7 +181,7 @@ var (
 // alone would persist addresses the filter then rejects.
 //
 // It approximates rather than reproduces the address test in kad-dht's
-// PublicRoutingTableFilter, which someguy cannot call because kad-dht does not
+// PublicRoutingTableFilter, which needle cannot call because kad-dht does not
 // export it. That one starts with manet.ToIP and rejects anything without an
 // IP, so it drops /dns4 and /dnsaddr addresses that this keeps, and its IPv6
 // rules differ slightly. The effect is a replayed table that can hold a few

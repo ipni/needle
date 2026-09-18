@@ -41,8 +41,8 @@ var logger = logging.Logger(name)
 
 // DefaultRoutingTimeout bounds how long a /routing/v1 request may spend in the
 // routers. It must stay below the timeout clients put on the whole request,
-// otherwise a client gives up before someguy finishes and flushes, and the
-// records someguy did resolve are lost. The reference client, Helia's
+// otherwise a client gives up before needle finishes and flushes, and the
+// records needle did resolve are lost. The reference client, Helia's
 // delegated routing v1 client, aborts at 30s, and its clock starts before
 // ours, so the gap here also has to cover the request's network latency.
 const DefaultRoutingTimeout = 25 * time.Second
@@ -64,7 +64,7 @@ func init() {
 		return
 	}
 	pe, err := ocprom.NewExporter(ocprom.Options{
-		Namespace: "someguy",
+		Namespace: name,
 		Registry:  promRegistry,
 		OnError: func(err error) {
 			logger.Errorf("ocprom error: %w", err)
@@ -105,7 +105,7 @@ const (
 	// DefaultStreamingRecordsLimit caps results for `Accept:
 	// application/x-ndjson` requests. Sits above the JSON cap so streaming
 	// returns "more results" per HTTP Routing v1 section 4.1.5. Set
-	// SOMEGUY_STREAMING_RECORDS_LIMIT=0 to disable the cap.
+	// NEEDLE_STREAMING_RECORDS_LIMIT=0 to disable the cap.
 	DefaultStreamingRecordsLimit = 1000
 )
 
@@ -173,12 +173,12 @@ func registerPprof(mux *http.ServeMux) {
 // apiMux builds the mux the API server serves: the routing handler, the metrics
 // endpoint, /version, and the pprof endpoints when they are switched on.
 //
-// This is deliberately a mux of someguy's own rather than http.DefaultServeMux,
+// This is deliberately a mux of needle's own rather than http.DefaultServeMux,
 // which is what the server used before profiling existed. Importing
 // net/http/pprof registers the profiling endpoints on the default mux in that
 // package's init, so on the default mux the profiles would be served whatever
 // --pprof said. A mux of our own is the only way the flag can actually gate
-// them. Nothing else someguy runs registers on the default mux.
+// them. Nothing else needle runs registers on the default mux.
 func apiMux(handler http.Handler, cfg *config) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", handler)
@@ -188,7 +188,7 @@ func apiMux(handler http.Handler, cfg *config) *http.ServeMux {
 		fmt.Fprintf(w, "Version: %s\n", version)
 	})
 
-	// Gated rather than always on: someguy may be run with an API address that
+	// Gated rather than always on: needle may be run with an API address that
 	// is not loopback, and pprof there would expose the profiles and the
 	// command line to the network. On loopback it is no more exposed than the
 	// metrics endpoint above.
@@ -228,7 +228,7 @@ func start(ctx context.Context, cfg *config) error {
 		fmt.Printf("Delegated routing endpoints for /routing/v1/ipns: %v\n", cfg.ipnsEndpoints)
 	}
 
-	fmt.Printf("Someguy libp2p host listening on %v\n", h.Addrs())
+	fmt.Printf("%s libp2p host listening on %v\n", name, h.Addrs())
 	var dhtRouting routing.Routing
 	switch cfg.dhtType {
 	case "accelerated":
@@ -469,7 +469,7 @@ func newHost(cfg *config) (host.Host, error) {
 	}
 
 	opts := []libp2p.Option{
-		libp2p.UserAgent("someguy/" + buildVersion()),
+		libp2p.UserAgent(name + "/" + buildVersion()),
 		libp2p.ConnectionManager(cmgr),
 		libp2p.ResourceManager(rcmgr),
 		libp2p.NATPortMap(),
@@ -521,7 +521,7 @@ func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddr
 	routers = append(routers, additionalRouters...)
 
 	// Resolution wraps the composed router rather than sitting beside
-	// sanitizeRouter, because /dnsaddr records reach someguy from the delegated
+	// sanitizeRouter, because /dnsaddr records reach needle from the delegated
 	// HTTP routers, which sanitizeRouter does not cover.
 	return withDNSAddrResolution(parallelRouter{routers: routers, trace: routerTrace, dhtTailBudget: dhtTailBudget, dhtTailMinResults: dhtTailMinResults}, dnsAddr, dnsAddrMode)
 }
@@ -534,7 +534,7 @@ func withDNSAddrResolution(r router, resolver *dnsAddrResolver, mode DNSAddrReso
 }
 
 func withTracingAndDebug(next http.Handler, authToken string) http.Handler {
-	next = otelhttp.NewHandler(next, "someguy.request")
+	next = otelhttp.NewHandler(next, name+".request")
 
 	// Remove tracing and cache skipping headers if not authorized
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

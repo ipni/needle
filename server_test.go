@@ -228,8 +228,8 @@ func TestCompressedNDJSONFlushesEachRecord(t *testing.T) {
 
 // The routing timeout has to leave the client room to receive the response.
 // Helia's delegated routing client aborts the whole request at 30s and starts
-// counting before someguy does, so anything at or above that loses every
-// record someguy resolved.
+// counting before needle does, so anything at or above that loses every
+// record needle resolved.
 func TestRoutingTimeoutLeavesRoomForClientDeadline(t *testing.T) {
 	t.Parallel()
 
