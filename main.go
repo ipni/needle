@@ -236,6 +236,12 @@ func main() {
 						EnvVars: []string{"SOMEGUY_DHT_TAIL_BUDGET"},
 						Usage:   "once every non-DHT router in a request has finished, give the DHT this much longer and then stop waiting for it; 0 disables. Requests served by the DHT alone are never cut.",
 					},
+					&cli.IntFlag{
+						Name:    "dht-tail-min-results",
+						Value:   0,
+						EnvVars: []string{"SOMEGUY_DHT_TAIL_MIN_RESULTS"},
+						Usage:   "floor of delivered results below which the DHT tail cut holds the DHT open for another budget instead of cutting it; 0 (default) cuts on the first fire, exactly as before. The hold is bounded, so a request that never reaches the floor still ends on its own schedule.",
+					},
 					&cli.StringFlag{
 						Name:    "datadir",
 						Value:   "",
@@ -281,6 +287,10 @@ func main() {
 					dhtTailBudget := ctx.Duration("dht-tail-budget")
 					if dhtTailBudget < 0 {
 						return fmt.Errorf("dht-tail-budget must be non-negative, got %s (0 disables)", dhtTailBudget)
+					}
+					dhtTailMinResults := ctx.Int("dht-tail-min-results")
+					if dhtTailMinResults < 0 {
+						return fmt.Errorf("dht-tail-min-results must be non-negative, got %d (0 disables the floor)", dhtTailMinResults)
 					}
 					findPeerGrace := ctx.Duration("dht-find-peer-grace")
 					if findPeerGrace < 0 {
@@ -330,11 +340,12 @@ func main() {
 						maxMemory:           ctx.Uint64("libp2p-max-memory"),
 						maxFD:               ctx.Int("libp2p-max-fd"),
 
-						tracingAuth:      ctx.String("tracing-auth"),
-						samplingFraction: ctx.Float64("sampling-fraction"),
-						pprof:            ctx.Bool("pprof"),
-						routerTrace:      ctx.Bool("router-trace"),
-						dhtTailBudget:    dhtTailBudget,
+						tracingAuth:       ctx.String("tracing-auth"),
+						samplingFraction:  ctx.Float64("sampling-fraction"),
+						pprof:             ctx.Bool("pprof"),
+						routerTrace:       ctx.Bool("router-trace"),
+						dhtTailBudget:     dhtTailBudget,
+						dhtTailMinResults: dhtTailMinResults,
 
 						autoConf: autoConfConfig{
 							enabled:         ctx.Bool("autoconf"),
@@ -370,6 +381,9 @@ func main() {
 					}
 					if cfg.dhtTailBudget > 0 {
 						fmt.Printf("SOMEGUY_DHT_TAIL_BUDGET = %s\n", cfg.dhtTailBudget)
+					}
+					if cfg.dhtTailMinResults > 0 {
+						fmt.Printf("SOMEGUY_DHT_TAIL_MIN_RESULTS = %d\n", cfg.dhtTailMinResults)
 					}
 					printIfListConfigured("SOMEGUY_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
 					printIfListConfigured("SOMEGUY_PEER_ENDPOINTS = ", cfg.peerEndpoints)

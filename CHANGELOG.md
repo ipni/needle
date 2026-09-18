@@ -15,6 +15,8 @@ The following emojis are used to highlight certain changes:
 
 ### Added
 
+- Optional, off-by-default `SOMEGUY_DHT_TAIL_MIN_RESULTS` (default `0`): a floor of delivered results below which the DHT tail cut holds the DHT open for another budget instead of cutting it. At `0` the cut is byte-identical to before; a request that has delivered fewer results than the floor when the timer fires keeps waiting, one at or above the floor is cut as now. The hold is bounded (at most 8 extra budgets), so a request that never reaches the floor still ends on its own schedule. New `someguy_router_tail_held` and `someguy_router_tail_held_seconds` metrics show how often and for how long the cut was held open. See [`docs/environment-variables.md`](https://github.com/ipfs/someguy/blob/main/docs/environment-variables.md#someguy_dht_tail_min_results).
+
 ### Changed
 
 ### Removed

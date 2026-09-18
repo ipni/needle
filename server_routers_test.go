@@ -653,7 +653,7 @@ func TestManyIter(t *testing.T) {
 		ctx := t.Context()
 
 		its := newMockIters[int](ctx, 2)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, 0, nil)
 
 		go func() {
 			its[0].ch <- iter.Result[int]{Val: 0}
@@ -688,7 +688,7 @@ func TestManyIter(t *testing.T) {
 		ctx := t.Context()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, 0, nil)
 
 		go func() {
 			close(its[0].ch)
@@ -719,7 +719,7 @@ func TestManyIter(t *testing.T) {
 		defer cancel()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, 0, nil)
 
 		go func() {
 			its[3].ch <- iter.Result[int]{Val: 3}
@@ -745,7 +745,7 @@ func TestManyIter(t *testing.T) {
 		defer cancel()
 
 		its := newMockIters[int](ctx, 5)
-		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, nil)
+		manyIter := newManyIter(ctx, mockItersAsInterface(its), nil, nil, 0, 0, nil)
 
 		go func() {
 			its[1].ch <- iter.Result[int]{Val: 1}
@@ -959,7 +959,7 @@ func TestRouterTimingExhausted(t *testing.T) {
 	slowIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("C"), peerRec("D")}, delay: delay}
 
 	trace := newRouterTrace(op, []string{fast, slow}, time.Now(), true)
-	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, nil, nil, 0, trace)
+	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, nil, nil, 0, 0, trace)
 
 	got, err := iter.ReadAllResults(mi)
 	require.NoError(t, err)
@@ -1028,7 +1028,7 @@ func TestRouterTimingCancelled(t *testing.T) {
 	slowIt := &timedIter{vals: []iter.Result[types.Record]{peerRec("X")}, delayEnd: 200 * time.Millisecond}
 
 	trace := newRouterTrace(op, []string{fast, slow}, time.Now(), true)
-	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, nil, nil, 0, trace)
+	mi := newManyIter(t.Context(), []iter.ResultIter[types.Record]{fastIt, slowIt}, nil, nil, 0, 0, trace)
 
 	// Exactly the four records available without waiting out the delay.
 	for range 4 {
@@ -1254,11 +1254,60 @@ func (r namedRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.R
 // the fan-out (and its timer) never happened.
 func cutFind(t *testing.T, routers []router, budget time.Duration) iter.ResultIter[types.Record] {
 	t.Helper()
-	r := parallelRouter{routers: routers, dhtTailBudget: budget}
+	return cutFindWithFloor(t, routers, budget, 0)
+}
+
+// cutFindWithFloor is cutFind with an explicit dht-tail-min-results floor. The
+// floor tests use it; the pre-floor tests go through cutFind, which pins the
+// floor at 0 - the shipped default.
+func cutFindWithFloor(t *testing.T, routers []router, budget time.Duration, minResults int) iter.ResultIter[types.Record] {
+	t.Helper()
+	r := parallelRouter{routers: routers, dhtTailBudget: budget, dhtTailMinResults: minResults}
 	it, err := r.FindProviders(t.Context(), cid.Undef, 0)
 	require.NoError(t, err)
 	return it
 }
+
+// deferredCtxIter yields vals one at a time; before yielding record i > 0 it
+// sleeps delayAfterFirst, so the second and later records are sent to the
+// consumer only after that gap. This is what lets a test make a request cross
+// the floor mid-window: the DHT's first record is delivered before the first
+// fire (below the floor), the second is delivered after it (crossing the
+// floor), so the second fire cuts.
+type deferredCtxIter struct {
+	ctx             context.Context
+	vals            []iter.Result[types.Record]
+	delayAfterFirst time.Duration
+	i               int
+
+	sawCancel bool
+}
+
+var _ iter.ResultIter[types.Record] = (*deferredCtxIter)(nil)
+
+func (c *deferredCtxIter) Next() bool {
+	if c.i >= len(c.vals) {
+		// Run out: block until the context ends, like a DHT walk that keeps
+		// running.
+		<-c.ctx.Done()
+		c.sawCancel = true
+		return false
+	}
+	if c.i > 0 && c.delayAfterFirst > 0 {
+		select {
+		case <-time.After(c.delayAfterFirst):
+		case <-c.ctx.Done():
+			c.sawCancel = true
+			return false
+		}
+	}
+	c.i++
+	return true
+}
+
+func (c *deferredCtxIter) Val() iter.Result[types.Record] { return c.vals[c.i-1] }
+
+func (c *deferredCtxIter) Close() error { return nil }
 
 func TestDHTTailCutFires(t *testing.T) {
 	const (
@@ -1584,6 +1633,361 @@ func TestDHTTailCutCloseRacesTimer(t *testing.T) {
 	require.True(t, dhtIt.sawCancel, "the DHT saw its context end")
 }
 
+// ---------------------------------------------------------------------------
+// DHT tail cut floor (dht-tail-min-results).
+//
+// The floor makes the cut's timer check how many results the request has
+// delivered when it fires: at or above the floor it cuts as before, below it
+// holds the DHT open for another budget. These tests pin each arm of that
+// decision, plus the bound that keeps a never-crossing request from living
+// indefinitely.
+
+// TestDHTTailFloorZeroIdentical is the "byte-identical at 0" proof: with the
+// floor at its default of 0, a below-floor-shaped request (the DHT delivers
+// nothing before the budget) cuts on the first fire exactly as it did before
+// the floor existed. The cut fires once, not after a hold, and the held-open
+// metric is untouched.
+func TestDHTTailFloorZeroIdentical(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 100 * time.Millisecond
+	)
+
+	heldBefore := testutil.ToFloat64(routerTailHeld)
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{}, blockUntilCancel: true}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A")})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	start := time.Now()
+	it := cutFindWithFloor(t, routers, budget, 0)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	elapsed := time.Since(start)
+	require.Equal(t, []string{peer.ID("A").String()}, got, "only the fast router's record; the DHT cut before it delivered")
+
+	// Cut on the first fire: about one budget after the fast router finished,
+	// not held open for a second.
+	require.Greater(t, elapsed, budget)
+	require.Less(t, elapsed, budget+time.Second)
+	require.True(t, dhtIt.sawCancel, "the DHT was cut on the first fire")
+
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
+	// The floor is at 0, so no fire held the DHT open: the held metric is
+	// untouched. This is the observable form of "byte-identical to before".
+	require.Equal(t, heldBefore, testutil.ToFloat64(routerTailHeld), "floor 0 never holds the DHT open")
+}
+
+// TestDHTTailFloorHoldsBelowFloor is the core case: below the floor the cut
+// does not cancel the DHT on the first fire. It holds it open for another
+// budget, and keeps holding as long as the request stays below the floor. The
+// test observes a few holds, then Close ends the request - proving the cut did
+// not cancel the DHT on any of those fires.
+func TestDHTTailFloorHoldsBelowFloor(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 100 * time.Millisecond
+	)
+
+	heldBefore := testutil.ToFloat64(routerTailHeld)
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	// The DHT delivers one record, then blocks until cancelled - it never runs
+	// out on its own. delivered stays at 1 < floor 2 for the whole request, so
+	// every fire holds. The test Close ends the request after observing a few
+	// holds.
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{}) // nothing, so delivered stays at 1 < floor 2
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	it := cutFindWithFloor(t, routers, budget, 2)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	// Read the one record the DHT produced.
+	require.True(t, it.Next())
+	require.Equal(t, peer.ID("D").String(), it.Val().Val.(*types.PeerRecord).ID.String())
+
+	// Wait until at least 3 fires have held the DHT open. Each fire is ~100 ms
+	// apart, so this takes ~300 ms. The holds counter is only incremented by the
+	// timer callback, so it is safe to read here.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(routerTailHeld) >= heldBefore+3
+	}, 2*time.Second, 10*time.Millisecond, "at least 3 below-floor fires held the DHT open")
+
+	// Close ends the request. The DHT was never cut by the floor - it saw the
+	// cancel from Close, not from a cut.
+	require.NoError(t, mi.Close())
+	require.True(t, dhtIt.sawCancel, "the DHT saw its context end (from Close, not a cut)")
+
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut: the DHT was held open on every fire")
+	// At least 3 holds were recorded (there may be more if a fire landed between
+	// the Eventually and Close, but that is fine - the point is the cut did not
+	// fire).
+	require.GreaterOrEqual(t, testutil.ToFloat64(routerTailHeld), heldBefore+3, "at least 3 holds recorded")
+}
+
+// TestDHTTailFloorCutsAtFloor is the at/above-floor case: a request that has
+// already delivered at least the floor when the timer fires is cut exactly as
+// before the floor existed. The held metric is untouched.
+func TestDHTTailFloorCutsAtFloor(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 100 * time.Millisecond
+	)
+
+	heldBefore := testutil.ToFloat64(routerTailHeld)
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A"), peerRec("B")}) // 2 delivered >= floor 2
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	start := time.Now()
+	it := cutFindWithFloor(t, routers, budget, 2)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	elapsed := time.Since(start)
+	require.ElementsMatch(t, []string{peer.ID("A").String(), peer.ID("B").String(), peer.ID("D").String()}, got)
+
+	// Cut on the first fire: about one budget after the fast router finished.
+	require.Greater(t, elapsed, budget)
+	require.Less(t, elapsed, budget+time.Second)
+	require.True(t, dhtIt.sawCancel, "the DHT was cut at the floor")
+
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
+	require.Equal(t, heldBefore, testutil.ToFloat64(routerTailHeld), "no hold: the request was at the floor")
+}
+
+// TestDHTTailFloorCrossesMidWindow is the mid-window case: below the floor on
+// the first fire, the DHT delivers enough during the hold window to cross the
+// floor, so the second fire cuts. This is what makes checking the floor at fire
+// time (not arm time) matter.
+func TestDHTTailFloorCrossesMidWindow(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 100 * time.Millisecond
+	)
+
+	heldBefore := testutil.ToFloat64(routerTailHeld)
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	// The DHT delivers one record at once, then waits 150 ms before the second.
+	// The first fire lands at ~100 ms (delivered=1 < floor 2: hold). The second
+	// record is sent at ~150 ms (delivered=2 >= floor 2). The second fire lands
+	// at ~200 ms and cuts. Both records are present, so the hold let the DHT
+	// keep running until it crossed the floor mid-window.
+	dhtIt := &deferredCtxIter{vals: []iter.Result[types.Record]{peerRec("D"), peerRec("E")}, delayAfterFirst: 150 * time.Millisecond}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{}) // nothing; the DHT's records carry the count
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	it := cutFindWithFloor(t, routers, budget, 2)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	require.ElementsMatch(t, []string{peer.ID("D").String(), peer.ID("E").String()}, got)
+
+	// The DHT was cut on the second fire, after the mid-window cross.
+	require.True(t, dhtIt.sawCancel, "the DHT was cut on the second fire")
+
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
+	// Exactly one hold: the first fire held (below floor), the second cut (at
+	// floor after the mid-window cross).
+	require.Equal(t, heldBefore+1, testutil.ToFloat64(routerTailHeld), "one hold before the mid-window cross")
+}
+
+// TestDHTTailFloorBoundIsFinite is the bound case: a request that never reaches
+// the floor is still cut after maxTailHolds holds, so it cannot live
+// indefinitely. The DHT blocks until cancelled and delivers nothing, so every
+// fire is below the floor; the (maxTailHolds+1)th cuts.
+func TestDHTTailFloorBoundIsFinite(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 20 * time.Millisecond
+	)
+
+	heldBefore := testutil.ToFloat64(routerTailHeld)
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{}, blockUntilCancel: true}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{}) // nothing, ever
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	start := time.Now()
+	it := cutFindWithFloor(t, routers, budget, 1)
+	require.IsType(t, &manyIter[types.Record]{}, it)
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	elapsed := time.Since(start)
+	require.Empty(t, got, "no results were ever delivered")
+
+	// The request ends after maxTailHolds holds plus the final cut: about
+	// (maxTailHolds+1) budgets after the fast router finished. It is finite and
+	// bounded, not indefinite.
+	require.GreaterOrEqual(t, elapsed, time.Duration(maxTailHolds)*budget)
+	require.Less(t, elapsed, time.Duration(maxTailHolds+2)*budget+time.Second)
+	require.True(t, dhtIt.sawCancel, "the DHT was cut once the holds were exhausted")
+
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut at the bound")
+	// Every fire below the bound held: exactly maxTailHolds holds.
+	require.Equal(t, heldBefore+float64(maxTailHolds), testutil.ToFloat64(routerTailHeld), "maxTailHolds holds before the bounded cut")
+}
+
+// TestDHTTailFloorNeverArmsWithoutNonDHTRouter pins that a request served by the
+// DHT alone is never cut at any floor: there is no non-DHT router to finish, so
+// the timer is never armed and the floor is never checked.
+func TestDHTTailFloorNeverArmsWithoutNonDHTRouter(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		dhtName = "dht"
+		budget  = 100 * time.Millisecond
+	)
+
+	heldBefore := testutil.ToFloat64(routerTailHeld)
+	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 150 * time.Millisecond}
+	routers := []router{
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("E")})
+		}}}},
+	}
+
+	it := cutFindWithFloor(t, routers, budget, 5) // a floor high enough that, if armed, it would hold
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	require.ElementsMatch(t, []string{peer.ID("D").String(), peer.ID("E").String()}, got)
+	require.False(t, dhtIt.sawCancel, "a DHT-only request is never cut, at any floor")
+
+	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
+	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut")
+	require.Equal(t, heldBefore, testutil.ToFloat64(routerTailHeld), "no hold: the timer was never armed")
+
+	mi.mu.Lock()
+	timer := mi.timer
+	mi.mu.Unlock()
+	require.Nil(t, timer, "no non-cuttable router: no timer is armed at any floor")
+}
+
+// TestDHTTailFloorDeliveredCounterRacesTimer exercises the one shape the other
+// floor tests do not cover: the timer callback reading mi.delivered while a
+// fan-out goroutine writes it. The DHT streams records continuously so its
+// goroutine is adding to the counter for the whole request; the fires read it
+// to decide cut-or-hold. -race watches that read/write pair across every fire.
+func TestDHTTailFloorDeliveredCounterRacesTimer(t *testing.T) {
+	const (
+		op      = routerOpProviders
+		fast    = "delegated:cid.contact"
+		dhtName = "dht"
+		budget  = 10 * time.Millisecond
+	)
+
+	// A DHT that keeps producing: each Next blocks briefly, so its fan-out
+	// goroutine is adding to mi.delivered while the timer fires and reads it.
+	// The floor is high enough that no fire cuts; the request ends when Close
+	// cancels it, after a few records.
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D"), peerRec("E"), peerRec("F")}, blockAfter: 100 * time.Millisecond}
+	routers := []router{
+		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	it := cutFindWithFloor(t, routers, budget, 1000) // never reached: every fire holds
+	require.IsType(t, &manyIter[types.Record]{}, it)
+	mi := it.(*manyIter[types.Record])
+
+	// Read a few records, then Close while the DHT is still producing. The fires
+	// that land in between are reading mi.delivered from the timer goroutine at
+	// the same time the DHT's goroutine writes it.
+	var got []string
+	for range 2 {
+		require.True(t, it.Next())
+		got = append(got, it.Val().Val.(*types.PeerRecord).ID.String())
+	}
+	require.NoError(t, mi.Close())
+
+	require.ElementsMatch(t, []string{peer.ID("D").String(), peer.ID("E").String()}, got)
+}
+
 func TestFindSingleRouterPath(t *testing.T) {
 	const (
 		fast    = "delegated:cid.contact"
@@ -1643,15 +2047,17 @@ func TestFindSingleRouterPath(t *testing.T) {
 func TestCombineRoutersDHTTailBudget(t *testing.T) {
 	mockRouter := composableRouter{}
 
-	// The budget reaches the parallelRouter combineRouters builds.
-	v := combineRouters(nil, &bundledDHT{}, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 500*time.Millisecond)
+	// The budget and floor reach the parallelRouter combineRouters builds.
+	v := combineRouters(nil, &bundledDHT{}, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 500*time.Millisecond, 3)
 	require.IsType(t, parallelRouter{}, v)
 	require.Equal(t, 500*time.Millisecond, v.(parallelRouter).dhtTailBudget)
+	require.Equal(t, 3, v.(parallelRouter).dhtTailMinResults)
 
 	// A zero budget is the default and disables the cut.
-	v = combineRouters(nil, &bundledDHT{}, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 0)
+	v = combineRouters(nil, &bundledDHT{}, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 0, 0)
 	require.IsType(t, parallelRouter{}, v)
 	require.Equal(t, time.Duration(0), v.(parallelRouter).dhtTailBudget)
+	require.Equal(t, 0, v.(parallelRouter).dhtTailMinResults)
 }
 
 // TestWrappedDHTRouterIsCuttable pins the assertion finding #1 rests on: the

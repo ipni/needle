@@ -190,6 +190,27 @@ var (
 		Namespace: name,
 		Help:      "Number of multi-router requests in which this router was the last to finish",
 	}, []string{"router"})
+
+	// routerTailHeld is how often the tail cut's timer fired with the request
+	// still below dht-tail-min-results and so kept the DHT running instead of
+	// cutting it, and for how long. It is observed once per held-open fire, not
+	// once per request: a request that fires twice holds twice. The cost the
+	// floor buys - more DHT time spent on requests that had not found enough -
+	// is visible here rather than inferred from done_seconds.
+	routerTailHeld = promauto.NewCounter(prometheus.CounterOpts{
+		Name:      "tail_held",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "Number of times the DHT tail cut fired with fewer delivered results than dht-tail-min-results and held the DHT open for another budget instead of cutting it",
+	})
+
+	routerTailHeldDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:      "tail_held_seconds",
+		Subsystem: "router",
+		Namespace: name,
+		Help:      "How long the DHT tail cut held the DHT open for on a below-floor fire, from the last non-DHT router finishing to that fire",
+		Buckets:   routerTimingBuckets,
+	})
 )
 
 // unwrapRouter peels the wrappers combineRouters puts around a router -
@@ -466,21 +487,25 @@ type parallelRouter struct {
 	// dhtTailBudget bounds how long the DHT may keep a request open after every
 	// other router has finished; 0 disables the cut.
 	dhtTailBudget time.Duration
+	// dhtTailMinResults is the floor of delivered results below which the tail
+	// cut holds the DHT open for another budget instead of cutting it. 0 (the
+	// default) cuts on the first fire, exactly as before the floor existed.
+	dhtTailMinResults int
 }
 
 func (r parallelRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
-	return find(ctx, r.routers, routerOpProviders, r.trace, r.dhtTailBudget, func(ri router, ctx context.Context) (iter.ResultIter[types.Record], error) {
+	return find(ctx, r.routers, routerOpProviders, r.trace, r.dhtTailBudget, r.dhtTailMinResults, func(ri router, ctx context.Context) (iter.ResultIter[types.Record], error) {
 		return ri.FindProviders(ctx, key, limit)
 	})
 }
 
 func (r parallelRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
-	return find(ctx, r.routers, routerOpPeers, r.trace, r.dhtTailBudget, func(ri router, ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
+	return find(ctx, r.routers, routerOpPeers, r.trace, r.dhtTailBudget, r.dhtTailMinResults, func(ri router, ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
 		return ri.FindPeers(ctx, pid, limit)
 	})
 }
 
-func find[T any](ctx context.Context, routers []router, op string, trace bool, dhtTailBudget time.Duration, call func(router, context.Context) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
+func find[T any](ctx context.Context, routers []router, op string, trace bool, dhtTailBudget time.Duration, dhtTailMinResults int, call func(router, context.Context) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
 	// The clock starts here, not after the iterators are built: creating a
 	// delegated iterator is an HTTP round trip, and that is part of what the
 	// router cost the request.
@@ -527,11 +552,11 @@ func find[T any](ctx context.Context, routers []router, op string, trace bool, d
 	}
 
 	// Otherwise return manyIter with remaining iterators.
-	return newManyIter(ctx, its, cancels, cuttable, dhtTailBudget, newRouterTrace(op, names, start, trace)), nil
+	return newManyIter(ctx, its, cancels, cuttable, dhtTailBudget, dhtTailMinResults, newRouterTrace(op, names, start, trace)), nil
 }
 
 func (r parallelRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
-	return find(ctx, r.routers, routerOpClosest, r.trace, r.dhtTailBudget, func(ri router, ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
+	return find(ctx, r.routers, routerOpClosest, r.trace, r.dhtTailBudget, r.dhtTailMinResults, func(ri router, ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
 		return ri.GetClosestPeers(ctx, key)
 	})
 }
@@ -548,34 +573,70 @@ type manyIter[T any] struct {
 
 	// DHT tail cut. cancels[i] is router i's context cancel; cuttable marks
 	// the routers a cut may cancel (the DHT); budget <= 0 or no cuttable and
-	// non-cuttable pair means no timer is ever armed.
-	cancels  []context.CancelFunc
-	cuttable []bool
-	budget   time.Duration
+	// non-cuttable pair means no timer is ever armed. minResults is the floor
+	// of delivered results below which a fire holds the DHT open for another
+	// budget instead of cutting it; 0 cuts on the first fire, as before.
+	cancels    []context.CancelFunc
+	cuttable   []bool
+	budget     time.Duration
+	minResults int
 
 	mu            sync.Mutex
 	timer         *time.Timer
 	timersPending int // non-cuttable iterators that have not finished yet
 
-	// cut is set by the timer callback when the DHT tail budget expires. It is
-	// atomic because the writer (the timer goroutine) and the readers (a router
-	// goroutine finishing, the closer goroutine) never share a lock: a cuttable
-	// router woken by Close reads it while the timer may still be writing it.
+	// cut is set by the timer callback when the DHT tail budget expires and the
+	// request has at least minResults delivered. It is atomic because the
+	// writer (the timer goroutine) and the readers (a router goroutine
+	// finishing, the closer goroutine) never share a lock: a cuttable router
+	// woken by Close reads it while the timer may still be writing it. A fire
+	// that holds the DHT open does not set it, so mi.cut keeps meaning "the
+	// DHT was actually cut" and the finishReason labels stay truthful.
 	cut atomic.Bool
+
+	// delivered counts successful results handed to the consumer across every
+	// router, as they are sent on ch. The timer callback reads it to decide
+	// whether a fire cuts or holds; the fan-out goroutines write it. It is
+	// atomic for the same reason cut is: the timer goroutine and the router
+	// goroutines never share mi.mu, so a mutex-guarded counter would deadlock
+	// against the existing locking.
+	delivered atomic.Int64
+
+	// heldStart is when the last non-cuttable iterator finished, i.e. when the
+	// cut timer first armed. The tail_held_seconds metric measures each
+	// below-floor hold from this point. It is written once under mi.mu in
+	// maybeArmCut and read only by the timer callback, which runs after arming.
+	heldStart time.Time
+
+	// holds is how many times a fire has held the DHT open instead of cutting
+	// it. The hold is bounded: after maxTailHolds holds the cut fires anyway,
+	// so a request that never reaches the floor still ends on its own schedule
+	// (timeoutPerOp per round, routing-timeout for the whole request) rather
+	// than living indefinitely.
+	holds int
 }
 
-func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], cancels []context.CancelFunc, cuttable []bool, budget time.Duration, trace *routerTrace) *manyIter[T] {
+// maxTailHolds bounds how many times a below-floor fire may hold the DHT open
+// before the cut fires anyway. It caps the worst-case extra time the floor adds
+// to a request: (maxTailHolds + 1) budgets after the last non-DHT router
+// finishes, which is well inside routing-timeout for any sensible budget. A
+// request that never reaches the floor therefore still ends on its own
+// schedule rather than living indefinitely.
+const maxTailHolds = 8
+
+func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], cancels []context.CancelFunc, cuttable []bool, budget time.Duration, minResults int, trace *routerTrace) *manyIter[T] {
 	ctx, cancel := context.WithCancel(ctx)
 
 	mi := &manyIter[T]{
-		ctx:      ctx,
-		cancel:   cancel,
-		its:      its,
-		ch:       make(chan iter.Result[T]),
-		trace:    trace,
-		cancels:  cancels,
-		cuttable: cuttable,
-		budget:   budget,
+		ctx:        ctx,
+		cancel:     cancel,
+		its:        its,
+		ch:         make(chan iter.Result[T]),
+		trace:      trace,
+		cancels:    cancels,
+		cuttable:   cuttable,
+		budget:     budget,
+		minResults: minResults,
 	}
 
 	// The cut arms only when it can fire: a positive budget, something to cut
@@ -604,6 +665,7 @@ func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], cancels [
 				select {
 				case mi.ch <- val:
 					if val.Err == nil {
+						mi.delivered.Add(1)
 						trace.record(i, val.Val)
 					}
 				case <-ctx.Done():
@@ -665,7 +727,9 @@ func (mi *manyIter[T]) requestReason() string {
 
 // maybeArmCut starts the cut timer when the last non-cuttable iterator has
 // finished. One timer per request, started at most once: after it is armed,
-// timersPending stays 0 and no further call can start a second one.
+// timersPending stays 0 and no further call can start a second one. A fire that
+// holds the DHT open re-arms through armCutTimer, not here: by then
+// timersPending is already 0, so this function would refuse to arm again.
 func (mi *manyIter[T]) maybeArmCut() {
 	if mi.budget <= 0 || mi.trace == nil {
 		return
@@ -681,15 +745,73 @@ func (mi *manyIter[T]) maybeArmCut() {
 		mi.mu.Unlock()
 		return
 	}
-	mi.timer = time.AfterFunc(mi.budget, func() {
-		mi.cut.Store(true)
-		for i := range mi.its {
-			if mi.cuttable[i] {
-				mi.cancels[i]()
-			}
-		}
-	})
+	mi.heldStart = time.Now()
+	mi.armCutTimer()
 	mi.mu.Unlock()
+}
+
+// armCutTimer arms the cut timer for one budget. It is called with mi.mu held,
+// both from maybeArmCut (the first arming) and from onCutFire's hold path (a
+// re-arm after a below-floor fire). At most one timer is ever live: the caller
+// only reaches here when no timer is pending, so a fresh AfterFunc replaces a
+// stopped or already-fired one rather than running alongside it.
+func (mi *manyIter[T]) armCutTimer() {
+	mi.timer = time.AfterFunc(mi.budget, mi.onCutFire)
+}
+
+// onCutFire is the cut timer's callback. It reads the delivered-result counter
+// - written by the fan-out goroutines as results are handed to the consumer -
+// and decides whether this fire cuts or holds:
+//
+//   - minResults == 0 (the default): cut, exactly as before the floor existed.
+//     This is the shipped path; a request that delivered nothing still cuts on
+//     the first fire.
+//   - at or above the floor: cut. The client already has what it needs.
+//   - below the floor, with holds left: do not cancel. Hold the DHT open for
+//     another budget and re-arm. Results that arrive during the window are
+//     counted, so a request that crosses the floor mid-window is cut on the
+//     next fire.
+//   - below the floor with no holds left: cut, so the hold stays bounded.
+//
+// Only a cut sets mi.cut and cancels the DHT's context; a hold leaves both
+// alone, so mi.cut keeps meaning "the DHT was actually cut" and the
+// finishReason labels and tail_seconds metric stay truthful.
+func (mi *manyIter[T]) onCutFire() {
+	if mi.minResults == 0 || mi.delivered.Load() >= int64(mi.minResults) {
+		mi.doCut()
+		return
+	}
+
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	if mi.holds < maxTailHolds {
+		mi.holds++
+		routerTailHeld.Inc()
+		routerTailHeldDuration.Observe(time.Since(mi.heldStart).Seconds())
+		mi.armCutTimer()
+		return
+	}
+	// The hold is exhausted: cut anyway so the request stays bounded. Cancelling
+	// a context does not take mi.mu, so this is safe under the lock.
+	mi.cut.Store(true)
+	for i := range mi.its {
+		if mi.cuttable[i] {
+			mi.cancels[i]()
+		}
+	}
+}
+
+// doCut sets the cut flag and cancels every cuttable router's context. It is
+// called from onCutFire without mi.mu held, where the cancel is safe: a
+// cancelled iterator that was still producing reads the cut flag through
+// finishReason rather than blocking on it.
+func (mi *manyIter[T]) doCut() {
+	mi.cut.Store(true)
+	for i := range mi.its {
+		if mi.cuttable[i] {
+			mi.cancels[i]()
+		}
+	}
 }
 
 // stopCut stops the cut timer if it is still pending. Called when the request

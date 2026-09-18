@@ -17,6 +17,7 @@ The environment variables below override `someguy`'s built-in defaults.
   - [`SOMEGUY_DNSADDR_RESOLUTION`](#someguy_dnsaddr_resolution)
   - [`SOMEGUY_ROUTING_TIMEOUT`](#someguy_routing_timeout)
   - [`SOMEGUY_DHT_TAIL_BUDGET`](#someguy_dht_tail_budget)
+  - [`SOMEGUY_DHT_TAIL_MIN_RESULTS`](#someguy_dht_tail_min_results)
   - [`SOMEGUY_RECORDS_LIMIT`](#someguy_records_limit)
   - [`SOMEGUY_STREAMING_RECORDS_LIMIT`](#someguy_streaming_records_limit)
   - [`SOMEGUY_PROVIDER_ENDPOINTS`](#someguy_provider_endpoints)
@@ -187,6 +188,22 @@ $ SOMEGUY_DHT_TAIL_BUDGET=500ms someguy start
 ```
 
 Default: `0` (disabled)
+
+### `SOMEGUY_DHT_TAIL_MIN_RESULTS`
+
+A floor of delivered results below which the DHT tail cut holds the DHT open for another budget instead of cutting it. The cut's timer fires on the same schedule as before - one `SOMEGUY_DHT_TAIL_BUDGET` after every non-DHT router has finished - but when it does, Someguy now checks how many results the request has already delivered: at or above the floor it cuts, exactly as now; below it, it lets the DHT keep running for another budget and checks again.
+
+The motivation is that the first provider is the difference between retrievable and not, while the twentieth is not. An unconditional cut prices them the same. A request that has found nothing when the timer fires is the one most worth keeping open; one that already has a handful of providers is not. The floor is checked when the timer fires, not when it arms, so results that arrive during the budget window count: a request that crosses the floor mid-window is cut on the next fire.
+
+The hold is bounded: after 8 below-floor fires the cut fires anyway, so a request that never reaches the floor still ends on its own schedule (`timeoutPerOp` per round, `SOMEGUY_ROUTING_TIMEOUT` for the whole request) rather than living indefinitely. A request served by the DHT alone is still never cut, at any floor.
+
+A value of `0` (the default) disables the floor entirely: the timer cuts on its first fire, byte-identical to behaviour before this flag existed. It exists so the cost of the floor can be measured in production - via `someguy_router_tail_held` and `someguy_router_tail_held_seconds` - rather than assumed.
+
+```console
+$ SOMEGUY_DHT_TAIL_BUDGET=500ms SOMEGUY_DHT_TAIL_MIN_RESULTS=1 someguy start
+```
+
+Default: `0` (the floor is disabled; the cut is unconditional)
 
 ### `SOMEGUY_RECORDS_LIMIT`
 
