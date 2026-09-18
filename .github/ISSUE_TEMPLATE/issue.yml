@@ -7,7 +7,7 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I have searched the [issue tracker](https://github.com/ipfs/someguy/issues?q=is%3Aissue) for existing issues.
+        - label: I have searched the [issue tracker](https://github.com/ipni/needle/issues?q=is%3Aissue) for existing issues.
           required: true
   - type: textarea
     attributes:

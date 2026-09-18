@@ -27,10 +27,10 @@ sit alongside it. Keeping both leaves the second row broken, because the
 surviving `/dnsaddr` does not match the excluded transport and so keeps the
 record alive.
 
-## When someguy resolves
+## When needle resolves
 
 Controlled by
-[`SOMEGUY_DNSADDR_RESOLUTION`](environment-variables.md#someguy_dnsaddr_resolution),
+[`NEEDLE_DNSADDR_RESOLUTION`](environment-variables.md#needle_dnsaddr_resolution),
 which defaults to `append`. Each mode is named after what a request without a
 filter does with the `/dnsaddr`:
 
@@ -50,31 +50,31 @@ the operator has changed it.
 
 That matters because `/dnsaddr` is an indirection on purpose. An operator uses
 it to change their address set without republishing provider records, and a
-resolved address is a snapshot from when someguy answered. Replacing it is
+resolved address is a snapshot from when needle answered. Replacing it is
 worth it for a filtered request, which has already said it only wants
 addresses it can use. Set `replace` if you would rather every response carried
 only resolved addresses: responses shrink and no client has to speak DNS, but
-a client that holds a record longer than someguy's DNS cache TTL cannot
+a client that holds a record longer than needle's DNS cache TTL cannot
 re-resolve the hostname from the response alone. Set `filtered` if you would
-rather someguy did no DNS work for requests that did not ask for filtering.
+rather needle did no DNS work for requests that did not ask for filtering.
 
 One filter value is the exception: `dnsaddr` names a protocol component, so a
 positive `?filter-addrs=dnsaddr` does match a `/dnsaddr`, and the client
-sending it is asking for the indirections themselves. Then someguy keeps the
+sending it is asking for the indirections themselves. Then needle keeps the
 `/dnsaddr` alongside whatever it resolves. A `/dnsaddr` naming a different
 peer is still dropped, a check that costs no lookup. A negative `!dnsaddr`
 replaces as usual, which is exactly the exclusion it asks for.
 
 ## Bounds
 
-Provider records are published by anyone, so the hostnames someguy is asked to
+Provider records are published by anyone, so the hostnames needle is asked to
 look up are attacker-influenced. Resolution is bounded on five axes:
 
 - **Per request.** One request triggers at most `MaxDNSAddrLookupsPerRequest`
   DNS lookups; names answered from the cache are free. Past the cap the address
   is passed through unresolved, which is the behavior from before this existed.
   Without this, one cheap request could name thousands of hostnames and make
-  someguy a relay for a DNS flood.
+  needle a relay for a DNS flood.
 - **Per record.** Resolution adds at most `MaxDNSAddrResolvedPerRecord`
   addresses to one record, the same bound go-libp2p puts on its dial path, so a
   record fanning out through nested `/dnsaddr` cannot balloon the response. A
@@ -89,7 +89,7 @@ look up are attacker-influenced. Resolution is bounded on five axes:
   mid-lookup cannot cache its cancellation as a failure, and a popular name is
   queried once, not once per waiting request.
 - **Recursion and breadth.** A `/dnsaddr` may resolve to another `/dnsaddr`.
-  someguy follows at most `DNSAddrRecursionLimit` hops, matching go-libp2p's
+  needle follows at most `DNSAddrRecursionLimit` hops, matching go-libp2p's
   dial path, and threads a per-record output limit through the recursion. Depth
   alone is not enough: a TXT record that lists itself expands as
   `fan^depth`, and re-entering an already-cached name costs no lookup, so a
@@ -104,7 +104,7 @@ look up are attacker-influenced. Resolution is bounded on five axes:
 
 Three more rules apply. Addresses whose `/p2p` component names a different peer
 are discarded, because a TXT record can list addresses for several peers and
-someguy is resolving on behalf of one. The private-address filter runs again
+needle is resolving on behalf of one. The private-address filter runs again
 over the result, because `manet` classifies `/dnsaddr/anything` as public while
 the addresses behind it may be private. And only a bare `/dnsaddr/<host>` is
 looked up at all: madns matches published entries against whatever follows the
@@ -116,7 +116,7 @@ whole multiaddr would fold case-sensitive components onto one key, and Unicode
 case mapping folds a few non-ASCII runes onto ASCII, which would let one record
 cache a failure under another name's key.
 
-If any part of an expansion is missing, someguy keeps the original `/dnsaddr`:
+If any part of an expansion is missing, needle keeps the original `/dnsaddr`:
 a failed lookup, a request out of lookup budget or already gone, a truncated
 expansion. The client keeps the indirection the missing addresses live behind,
 and a DNS outage degrades to the old behavior instead of dropping providers.
@@ -129,8 +129,8 @@ everything else, with `/p2p-circuit` relay addresses last. A client that dials
 in listed order tries the cheapest route first and falls back to a relay only
 as a last resort.
 
-This order applies to every record someguy serves while resolution is enabled.
-With `SOMEGUY_DNSADDR_RESOLUTION=never`, only records from the DHT keep it
+This order applies to every record needle serves while resolution is enabled.
+With `NEEDLE_DNSADDR_RESOLUTION=never`, only records from the DHT keep it
 (they pass the same sort while being sanitized); records from delegated
 routers are returned as received.
 
@@ -145,5 +145,5 @@ reach. That is for the provider operator to fix.
 
 - [ipfs/specs#542](https://github.com/ipfs/specs/issues/542): the IPIP proposing
   this behavior for all Delegated Routing implementations
-- [environment-variables.md](environment-variables.md#someguy_dnsaddr_resolution)
+- [environment-variables.md](environment-variables.md#needle_dnsaddr_resolution)
 - [metrics.md](metrics.md)

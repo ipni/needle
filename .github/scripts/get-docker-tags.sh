@@ -31,7 +31,7 @@ GIT_SHA1_SHORT=$(echo "$GIT_SHA1" | cut -c 1-7)
 GIT_BRANCH=${3:-$(git symbolic-ref -q --short HEAD || echo "unknown")}
 GIT_TAG=${4:-$(git describe --tags --exact-match 2> /dev/null || echo "")}
 
-IMAGE_NAME=${IMAGE_NAME:-ipfs/someguy}
+IMAGE_NAME=${IMAGE_NAME:-ipni/needle}
 
 echoImageName () {
   local IMAGE_TAG=$1
