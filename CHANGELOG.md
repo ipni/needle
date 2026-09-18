@@ -15,6 +15,8 @@ The following emojis are used to highlight certain changes:
 
 ### Added
 
+- `someguy_dht_crawl_reported_peers`, the number of peers a crawl reported before the public-address filter. `someguy_dht_crawl_peers` counts only peers with a public, non-relay address, which is the same set fullrt keeps in its routing table, so it is the table size rather than a measure of how far the crawl reached. The ratio of the two separates a small reachable network from a crawl that is not getting far. See [`docs/metrics.md`](https://github.com/ipfs/someguy/blob/main/docs/metrics.md).
+
 ### Changed
 
 ### Removed

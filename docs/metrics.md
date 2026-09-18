@@ -70,7 +70,8 @@ go-libp2p-kad-dht - so with the snapshot disabled every gauge below is still
 exported and reads `0`.
 
 - `someguy_dht_crawl_duration_seconds`: gauge of the duration of the last completed crawl in seconds. A crawl cancelled by shutdown does not update it
-- `someguy_dht_crawl_peers`: gauge of the peers found by the last completed crawl. A settled table is 10,000 to 25,000; a much smaller number is a broken crawl
+- `someguy_dht_crawl_peers`: gauge of the peers from the last completed crawl that have a public, non-relay address. fullrt keeps exactly this set in its routing table, so this is the table size and the snapshot file size as well as the crawl result. A settled table on the IPNI fleet is about 3,300 (measured 2026-09-18); a much smaller number is a broken crawl
+- `someguy_dht_crawl_reported_peers`: gauge of the peers the last completed crawl reported, *before* that address filter. Relay-only and privately addressed peers are counted here and not in `someguy_dht_crawl_peers`, so the ratio of the two is the share of the reachable network that is directly dialable. A table that looks small is only worrying if this is small too
 - `someguy_dht_crawl_snapshot_peers`: gauge of the peers in the last successfully saved snapshot
 - `someguy_dht_crawl_snapshot_last_success_timestamp_seconds`: gauge of the Unix timestamp of the last successful snapshot save
 - `someguy_dht_crawl_snapshot_restored_peers`: gauge of the peers replayed from the snapshot at startup, `0` when nothing was replayed

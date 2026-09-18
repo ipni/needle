@@ -86,12 +86,21 @@ import (
 // handle differently; a replay ignores versions it does not understand.
 const crawlSnapshotFormatVersion = 1
 
-// crawlSnapshotMinPeers is the smallest crawl result worth keeping. A settled
-// Amino DHT table is 10k-25k peers, so a crawl that finds far fewer is a
-// broken crawl, not a small network: saving it would persist the breakage, and
-// replaying it would make Ready() true for a table too thin to answer the
-// lookups that follow. Below this, a crawl is not saved and a file is not
-// replayed.
+// crawlSnapshotMinPeers is the smallest crawl result worth keeping. A crawl
+// that finds far fewer peers than a settled table holds is a broken crawl, not
+// a small network: saving it would persist the breakage, and replaying it would
+// make Ready() true for a table too thin to answer the lookups that follow.
+// Below this, a crawl is not saved and a file is not replayed.
+//
+// This comment used to claim a settled table is 10k-25k peers. Measured on the
+// IPNI fleet on 2026-09-18 it is about 3,300, consistently across twelve
+// instances in three countries, so 1000 is roughly 30% of a settled table
+// rather than the 4-10% the original figure implied. The constant is left where
+// it is deliberately: against the real number it is a tighter guard than it was
+// designed to be, and lowering it to restore the original ratio would only make
+// it accept crawls that are obviously broken. What was wrong was the
+// justification, not the value. See someguy_dht_crawl_reported_peers for
+// whether 3,300 is the whole story.
 const crawlSnapshotMinPeers = 1000
 
 // crawlReplayAddrTTL is how long replayed addresses live in the host
@@ -134,7 +143,21 @@ var (
 		Name:      "peers",
 		Namespace: name,
 		Subsystem: crawlSubsystem,
-		Help:      "Number of peers found by the last completed DHT crawl",
+		Help:      "Number of peers found by the last completed DHT crawl that have a public, non-relay address, which is the same set fullrt keeps in its routing table",
+	})
+
+	// crawlReportedPeers is crawlPeers before the address filter. fullrt keeps
+	// only peers with a public, non-relay address (kaddht.PublicRoutingTableFilter),
+	// and so does the snapshot, so crawlPeers is both the file size and the
+	// routing table size - but it says nothing about how much of the network the
+	// crawl actually reached. The ratio of the two is what distinguishes "the
+	// Amino DHT only has this many directly-dialable servers" from "our crawl is
+	// reaching a fraction of it", and without it neither can be ruled out.
+	crawlReportedPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:      "reported_peers",
+		Namespace: name,
+		Subsystem: crawlSubsystem,
+		Help:      "Number of peers the last completed DHT crawl reported, before the public-address filter that decides which of them enter the routing table",
 	})
 
 	crawlSnapshotPeers = promauto.NewGauge(prometheus.GaugeOpts{
@@ -373,6 +396,7 @@ func (c *snapshotCrawler) replay(ctx context.Context, handleSuccess crawler.Hand
 func (c *snapshotCrawler) crawl(ctx context.Context, startingPeers []*peer.AddrInfo, handleSuccess crawler.HandleQueryResult, handleFail crawler.HandleQueryFail) {
 	start := time.Now()
 	found := make(map[peer.ID][]ma.Multiaddr)
+	reported := 0
 
 	c.inner.Run(ctx, startingPeers, func(p peer.ID, rtPeers []*peer.AddrInfo) {
 		handleSuccess(p, rtPeers)
@@ -383,12 +407,17 @@ func (c *snapshotCrawler) crawl(ctx context.Context, startingPeers []*peer.AddrI
 		// and keeping them out of the file keeps them out of the peerstore on
 		// the next replay.
 		addrs := ma.FilterAddrs(c.addrs.Addrs(p), publicDialableAddr)
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Counted whether or not it is kept: the gap between the two is the
+		// share of the network that is relay-only or privately addressed, and
+		// nothing else records it.
+		reported++
 		if len(addrs) == 0 {
 			return
 		}
-		c.mu.Lock()
 		found[p] = addrs
-		c.mu.Unlock()
 	}, handleFail)
 
 	// Taking the map under the lock orders this read after the last
@@ -396,6 +425,7 @@ func (c *snapshotCrawler) crawl(ctx context.Context, startingPeers []*peer.AddrI
 	// returns, so nothing writes to it after this point.
 	c.mu.Lock()
 	crawled := found
+	reportedTotal := reported
 	c.mu.Unlock()
 
 	dur := time.Since(start)
@@ -412,6 +442,7 @@ func (c *snapshotCrawler) crawl(ctx context.Context, startingPeers []*peer.AddrI
 	c.mu.Unlock()
 	crawlDurationSeconds.Set(dur.Seconds())
 	crawlPeers.Set(float64(len(crawled)))
+	crawlReportedPeers.Set(float64(reportedTotal))
 
 	if len(crawled) < crawlSnapshotMinPeers {
 		logger.Warnf("dht crawl found only %d peers, fewer than the %d needed for a snapshot; not saving", len(crawled), crawlSnapshotMinPeers)
