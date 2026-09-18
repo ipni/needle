@@ -166,5 +166,7 @@ require (
 // target and return ErrNotFound when that dial failed, discarding addresses the
 // network had just reported. The fork returns them, moves the dial to a bounded
 // background goroutine, and stops querying shortly after the first peer reports
-// the target. Drop this replace once the change is upstream.
-replace github.com/libp2p/go-libp2p-kad-dht => github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.1
+// the target. The same tag also adds fullrt.WithRouteTableFilter, which the DHT
+// crawl snapshot needs to keep a replayed routing table. Drop this replace once
+// the changes are upstream.
+replace github.com/libp2p/go-libp2p-kad-dht => github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2
