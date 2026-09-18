@@ -240,7 +240,7 @@ func main() {
 						Name:    "dht-tail-min-results",
 						Value:   0,
 						EnvVars: []string{"SOMEGUY_DHT_TAIL_MIN_RESULTS"},
-						Usage:   "floor of delivered results below which the DHT tail cut holds the DHT open for another budget instead of cutting it; 0 (default) cuts on the first fire, exactly as before. The hold is bounded, so a request that never reaches the floor still ends on its own schedule.",
+						Usage:   "floor of distinct providers below which the DHT tail cut holds the DHT open for another budget instead of cutting it; 0 (default) cuts on the first fire, exactly as before. A provider returned by more than one router counts once. The hold is bounded (at most 9 x dht-tail-budget after the last non-DHT router finishes), so a request that never reaches the floor still ends on its own schedule.",
 					},
 					&cli.StringFlag{
 						Name:    "datadir",

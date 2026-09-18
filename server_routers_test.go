@@ -891,6 +891,14 @@ func counterVal(t *testing.T, c *prometheus.CounterVec, lv ...string) float64 {
 	return testutil.ToFloat64(c.WithLabelValues(lv...))
 }
 
+// heldVal reads the someguy_router_tail_held{op,outcome} series. The held
+// metrics are observed once per request that actually held (not once per fire),
+// so a test asserts an exact delta against this rather than counting fires.
+func heldVal(t *testing.T, op, outcome string) float64 {
+	t.Helper()
+	return counterVal(t, routerTailHeld, op, outcome)
+}
+
 // histVal reads one histogram series' observation count and sum. testutil has
 // no helper for this, so it goes through the gatherer the collectors are
 // registered with.
@@ -1655,7 +1663,7 @@ func TestDHTTailFloorZeroIdentical(t *testing.T) {
 		budget  = 100 * time.Millisecond
 	)
 
-	heldBefore := testutil.ToFloat64(routerTailHeld)
+	heldBefore := heldVal(t, op, tailHeldOutcomeFinished)
 	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{}, blockUntilCancel: true}
@@ -1690,7 +1698,7 @@ func TestDHTTailFloorZeroIdentical(t *testing.T) {
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
 	// The floor is at 0, so no fire held the DHT open: the held metric is
 	// untouched. This is the observable form of "byte-identical to before".
-	require.Equal(t, heldBefore, testutil.ToFloat64(routerTailHeld), "floor 0 never holds the DHT open")
+	require.Equal(t, heldBefore, heldVal(t, op, tailHeldOutcomeFinished), "floor 0 never holds the DHT open")
 }
 
 // TestDHTTailFloorHoldsBelowFloor is the core case: below the floor the cut
@@ -1706,17 +1714,17 @@ func TestDHTTailFloorHoldsBelowFloor(t *testing.T) {
 		budget  = 100 * time.Millisecond
 	)
 
-	heldBefore := testutil.ToFloat64(routerTailHeld)
+	heldBefore := heldVal(t, op, tailHeldOutcomeFinished)
 	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	// The DHT delivers one record, then blocks until cancelled - it never runs
-	// out on its own. delivered stays at 1 < floor 2 for the whole request, so
+	// out on its own. distinct stays at 1 < floor 2 for the whole request, so
 	// every fire holds. The test Close ends the request after observing a few
 	// holds.
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
 	routers := []router{
 		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
-			return iter.FromSlice([]iter.Result[types.Record]{}) // nothing, so delivered stays at 1 < floor 2
+			return iter.FromSlice([]iter.Result[types.Record]{}) // nothing, so distinct stays at 1 < floor 2
 		}},
 		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
 			dhtIt.ctx = ctx
@@ -1733,10 +1741,12 @@ func TestDHTTailFloorHoldsBelowFloor(t *testing.T) {
 	require.Equal(t, peer.ID("D").String(), it.Val().Val.(*types.PeerRecord).ID.String())
 
 	// Wait until at least 3 fires have held the DHT open. Each fire is ~100 ms
-	// apart, so this takes ~300 ms. The holds counter is only incremented by the
-	// timer callback, so it is safe to read here.
+	// apart, so this takes ~300 ms. The holds field is only written under mi.mu
+	// by the timer callback, so it is safe to read here under the lock.
 	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(routerTailHeld) >= heldBefore+3
+		mi.mu.Lock()
+		defer mi.mu.Unlock()
+		return mi.holds >= 3
 	}, 2*time.Second, 10*time.Millisecond, "at least 3 below-floor fires held the DHT open")
 
 	// Close ends the request. The DHT was never cut by the floor - it saw the
@@ -1746,10 +1756,10 @@ func TestDHTTailFloorHoldsBelowFloor(t *testing.T) {
 
 	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut: the DHT was held open on every fire")
-	// At least 3 holds were recorded (there may be more if a fire landed between
-	// the Eventually and Close, but that is fine - the point is the cut did not
-	// fire).
-	require.GreaterOrEqual(t, testutil.ToFloat64(routerTailHeld), heldBefore+3, "at least 3 holds recorded")
+	// The hold is observed out exactly once, when Close ends it - not once per
+	// fire - and its outcome is finished (the request ended before the floor was
+	// crossed or the holds ran out).
+	require.Equal(t, 1.0, heldVal(t, op, tailHeldOutcomeFinished)-heldBefore, "one hold observed when Close ends it")
 }
 
 // TestDHTTailFloorCutsAtFloor is the at/above-floor case: a request that has
@@ -1763,13 +1773,13 @@ func TestDHTTailFloorCutsAtFloor(t *testing.T) {
 		budget  = 100 * time.Millisecond
 	)
 
-	heldBefore := testutil.ToFloat64(routerTailHeld)
+	heldBefore := heldVal(t, op, tailHeldOutcomeCrossed)
 	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
 	routers := []router{
 		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
-			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A"), peerRec("B")}) // 2 delivered >= floor 2
+			return iter.FromSlice([]iter.Result[types.Record]{peerRec("A"), peerRec("B")}) // 2 distinct >= floor 2
 		}},
 		sanitizeRouter{router: dhtTestRouter{namedRouter{name: dhtName, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
 			dhtIt.ctx = ctx
@@ -1795,7 +1805,9 @@ func TestDHTTailFloorCutsAtFloor(t *testing.T) {
 
 	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
-	require.Equal(t, heldBefore, testutil.ToFloat64(routerTailHeld), "no hold: the request was at the floor")
+	// No hold: the request was already at the floor when the first fire landed,
+	// so nothing held and the crossed series is untouched.
+	require.Equal(t, heldBefore, heldVal(t, op, tailHeldOutcomeCrossed), "no hold: the request was at the floor")
 }
 
 // TestDHTTailFloorCrossesMidWindow is the mid-window case: below the floor on
@@ -1807,18 +1819,20 @@ func TestDHTTailFloorCrossesMidWindow(t *testing.T) {
 		op      = routerOpProviders
 		fast    = "delegated:cid.contact"
 		dhtName = "dht"
-		budget  = 100 * time.Millisecond
+		budget  = 200 * time.Millisecond
 	)
 
-	heldBefore := testutil.ToFloat64(routerTailHeld)
+	heldBefore := heldVal(t, op, tailHeldOutcomeCrossed)
 	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
-	// The DHT delivers one record at once, then waits 150 ms before the second.
-	// The first fire lands at ~100 ms (delivered=1 < floor 2: hold). The second
-	// record is sent at ~150 ms (delivered=2 >= floor 2). The second fire lands
-	// at ~200 ms and cuts. Both records are present, so the hold let the DHT
-	// keep running until it crossed the floor mid-window.
-	dhtIt := &deferredCtxIter{vals: []iter.Result[types.Record]{peerRec("D"), peerRec("E")}, delayAfterFirst: 150 * time.Millisecond}
+	// The DHT delivers one record at once, then waits 300 ms before the second.
+	// The first fire lands at ~200 ms (distinct=1 < floor 2: hold). The second
+	// record is sent at ~300 ms (distinct=2 >= floor 2). The second fire lands
+	// at ~400 ms and cuts. Both records are present, so the hold let the DHT
+	// keep running until it crossed the floor mid-window. The gaps on either side
+	// of the record (~100 ms) are wide enough that a loaded CI runner cannot
+	// drift the second record across the wrong fire.
+	dhtIt := &deferredCtxIter{vals: []iter.Result[types.Record]{peerRec("D"), peerRec("E")}, delayAfterFirst: 300 * time.Millisecond}
 	routers := []router{
 		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
 			return iter.FromSlice([]iter.Result[types.Record]{}) // nothing; the DHT's records carry the count
@@ -1843,9 +1857,9 @@ func TestDHTTailFloorCrossesMidWindow(t *testing.T) {
 
 	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut")
-	// Exactly one hold: the first fire held (below floor), the second cut (at
-	// floor after the mid-window cross).
-	require.Equal(t, heldBefore+1, testutil.ToFloat64(routerTailHeld), "one hold before the mid-window cross")
+	// The hold ended when the second fire crossed the floor: one observation in
+	// the crossed series, not one per fire.
+	require.Equal(t, heldBefore+1, heldVal(t, op, tailHeldOutcomeCrossed), "one hold, observed when the floor was crossed")
 }
 
 // TestDHTTailFloorBoundIsFinite is the bound case: a request that never reaches
@@ -1860,7 +1874,7 @@ func TestDHTTailFloorBoundIsFinite(t *testing.T) {
 		budget  = 20 * time.Millisecond
 	)
 
-	heldBefore := testutil.ToFloat64(routerTailHeld)
+	heldBefore := heldVal(t, op, tailHeldOutcomeExhausted)
 	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{}, blockUntilCancel: true}
@@ -1894,8 +1908,9 @@ func TestDHTTailFloorBoundIsFinite(t *testing.T) {
 
 	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(1), doneDHTCutAfter-doneDHTCutBefore, "the DHT was cut at the bound")
-	// Every fire below the bound held: exactly maxTailHolds holds.
-	require.Equal(t, heldBefore+float64(maxTailHolds), testutil.ToFloat64(routerTailHeld), "maxTailHolds holds before the bounded cut")
+	// The hold ran out of holds before crossing the floor: one observation in
+	// the exhausted series, not maxTailHolds.
+	require.Equal(t, heldBefore+1, heldVal(t, op, tailHeldOutcomeExhausted), "one hold, observed when the holds were exhausted")
 }
 
 // TestDHTTailFloorNeverArmsWithoutNonDHTRouter pins that a request served by the
@@ -1908,7 +1923,7 @@ func TestDHTTailFloorNeverArmsWithoutNonDHTRouter(t *testing.T) {
 		budget  = 100 * time.Millisecond
 	)
 
-	heldBefore := testutil.ToFloat64(routerTailHeld)
+	heldBefore := heldVal(t, op, tailHeldOutcomeFinished)
 	doneDHTCutBefore, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 
 	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockAfter: 150 * time.Millisecond}
@@ -1935,7 +1950,7 @@ func TestDHTTailFloorNeverArmsWithoutNonDHTRouter(t *testing.T) {
 
 	doneDHTCutAfter, _ := histVal(t, "someguy_router_done_seconds", map[string]string{"op": op, "router": dhtName, "reason": routerDoneCut})
 	require.Equal(t, uint64(0), doneDHTCutAfter-doneDHTCutBefore, "no cut")
-	require.Equal(t, heldBefore, testutil.ToFloat64(routerTailHeld), "no hold: the timer was never armed")
+	require.Equal(t, heldBefore, heldVal(t, op, tailHeldOutcomeFinished), "no hold: the timer was never armed")
 
 	mi.mu.Lock()
 	timer := mi.timer
@@ -1943,12 +1958,13 @@ func TestDHTTailFloorNeverArmsWithoutNonDHTRouter(t *testing.T) {
 	require.Nil(t, timer, "no non-cuttable router: no timer is armed at any floor")
 }
 
-// TestDHTTailFloorDeliveredCounterRacesTimer exercises the one shape the other
-// floor tests do not cover: the timer callback reading mi.delivered while a
-// fan-out goroutine writes it. The DHT streams records continuously so its
-// goroutine is adding to the counter for the whole request; the fires read it
-// to decide cut-or-hold. -race watches that read/write pair across every fire.
-func TestDHTTailFloorDeliveredCounterRacesTimer(t *testing.T) {
+// TestDHTTailFloorDistinctCounterRacesTimer exercises the one shape the other
+// floor tests do not cover: the timer callback reading mi.distinct (through
+// distinctCount) while a fan-out goroutine writes it (through noteDistinct).
+// The DHT streams records on a cadence that straddles several fires, so its
+// goroutine is adding to the set for the whole request; the fires read it to
+// decide cut-or-hold. -race watches that read/write pair across every fire.
+func TestDHTTailFloorDistinctCounterRacesTimer(t *testing.T) {
 	const (
 		op      = routerOpProviders
 		fast    = "delegated:cid.contact"
@@ -1956,11 +1972,11 @@ func TestDHTTailFloorDeliveredCounterRacesTimer(t *testing.T) {
 		budget  = 10 * time.Millisecond
 	)
 
-	// A DHT that keeps producing: each Next blocks briefly, so its fan-out
-	// goroutine is adding to mi.delivered while the timer fires and reads it.
-	// The floor is high enough that no fire cuts; the request ends when Close
-	// cancels it, after a few records.
-	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D"), peerRec("E"), peerRec("F")}, blockAfter: 100 * time.Millisecond}
+	// A DHT that yields a record every 3 ms, so its fan-out goroutine is adding
+	// to mi.distinct while the timer fires and reads it (fires land ~every 10
+	// ms). The floor is high enough that no fire cuts; the request ends when
+	// Close cancels it.
+	dhtIt := &pacedCtxIter{vals: []iter.Result[types.Record]{peerRec("D"), peerRec("E"), peerRec("F"), peerRec("G")}, pace: 3 * time.Millisecond}
 	routers := []router{
 		namedRouter{name: fast, providers: func(ctx context.Context) iter.ResultIter[types.Record] {
 			return iter.FromSlice([]iter.Result[types.Record]{})
@@ -1976,7 +1992,7 @@ func TestDHTTailFloorDeliveredCounterRacesTimer(t *testing.T) {
 	mi := it.(*manyIter[types.Record])
 
 	// Read a few records, then Close while the DHT is still producing. The fires
-	// that land in between are reading mi.delivered from the timer goroutine at
+	// that land in between are reading mi.distinct from the timer goroutine at
 	// the same time the DHT's goroutine writes it.
 	var got []string
 	for range 2 {
@@ -1987,6 +2003,116 @@ func TestDHTTailFloorDeliveredCounterRacesTimer(t *testing.T) {
 
 	require.ElementsMatch(t, []string{peer.ID("D").String(), peer.ID("E").String()}, got)
 }
+
+// TestDHTTailFloorInFlightFireDoesNotRearm is the #1 regression: a fire that is
+// already running when the request ends must not re-arm. Before the stopped
+// flag, stopCut's timer.Stop() returned false for a callback that had already
+// started, and the callback would then arm a fresh timer - one nothing stops -
+// which held the DHT open through all of maxTailHolds after the response was
+// written. The test drives that exact interleaving: arm the timer, run stopCut
+// (the request ends), then let the in-flight fire run and assert it did not
+// re-arm or hold.
+func TestDHTTailFloorInFlightFireDoesNotRearm(t *testing.T) {
+	const op = routerOpProviders
+
+	// Build a manyIter with a floor high enough that, if it held, it would keep
+	// holding. The fast router finishes at once (arming the timer); the DHT
+	// delivers one record and blocks until cancelled.
+	dhtIt := &ctxIter{vals: []iter.Result[types.Record]{peerRec("D")}, blockUntilCancel: true}
+	routers := []router{
+		namedRouter{name: "delegated:cid.contact", providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			return iter.FromSlice([]iter.Result[types.Record]{})
+		}},
+		sanitizeRouter{router: dhtTestRouter{namedRouter{name: "dht", providers: func(ctx context.Context) iter.ResultIter[types.Record] {
+			dhtIt.ctx = ctx
+			return dhtIt
+		}}}},
+	}
+
+	it := cutFindWithFloor(t, routers, 10*time.Millisecond, 2)
+	mi := it.(*manyIter[types.Record])
+	require.IsType(t, &manyIter[types.Record]{}, mi)
+
+	// Wait for the timer to arm (the fast router has finished).
+	require.Eventually(t, func() bool {
+		mi.mu.Lock()
+		defer mi.mu.Unlock()
+		return mi.timer != nil
+	}, time.Second, time.Millisecond, "the cut timer arms once the fast router finishes")
+
+	// The request ends while a fire is in flight: stopCut stops the pending
+	// timer and marks the request stopped.
+	mi.stopCut()
+
+	// Baseline the held metrics just before the in-flight fire runs, so the
+	// assertion isolates what onCutFire itself observes (it must observe
+	// nothing) from anything the real timer may have observed while it was
+	// pending.
+	baseCrossed := heldVal(t, op, tailHeldOutcomeCrossed)
+	baseExhausted := heldVal(t, op, tailHeldOutcomeExhausted)
+	baseFinished := heldVal(t, op, tailHeldOutcomeFinished)
+
+	// Now run the in-flight fire. It must see mi.stopped and return without
+	// holding, re-arming, or cutting - and observe nothing.
+	mi.onCutFire()
+
+	mi.mu.Lock()
+	timer := mi.timer
+	holds := mi.holds
+	stopped := mi.stopped
+	cut := mi.cut.Load()
+	mi.mu.Unlock()
+	require.True(t, stopped, "stopCut marked the request ended")
+	require.False(t, cut, "the in-flight fire did not cut")
+	require.Zero(t, holds, "the in-flight fire did not hold")
+	// The timer was stopped by stopCut and not replaced: a re-arm would have set
+	// it to a fresh, live AfterFunc.
+	if timer != nil {
+		require.False(t, timer.Stop(), "no fresh timer was armed after the request ended")
+	}
+
+	// onCutFire itself observed nothing: no held metric moved for any outcome.
+	require.Equal(t, baseCrossed, heldVal(t, op, tailHeldOutcomeCrossed), "the in-flight fire did not observe a crossed hold")
+	require.Equal(t, baseExhausted, heldVal(t, op, tailHeldOutcomeExhausted), "the in-flight fire did not observe an exhausted hold")
+	require.Equal(t, baseFinished, heldVal(t, op, tailHeldOutcomeFinished), "the in-flight fire did not observe a finished hold")
+}
+
+// pacedCtxIter yields vals one at a time, sleeping pace between each, so its
+// fan-out goroutine is writing mi.distinct on a cadence that straddles several
+// fires. It blocks until the context ends once the values are exhausted, like a
+// DHT walk that keeps running.
+type pacedCtxIter struct {
+	ctx  context.Context
+	vals []iter.Result[types.Record]
+	pace time.Duration
+	i    int
+
+	sawCancel bool
+}
+
+var _ iter.ResultIter[types.Record] = (*pacedCtxIter)(nil)
+
+func (c *pacedCtxIter) Next() bool {
+	if c.i >= len(c.vals) {
+		<-c.ctx.Done()
+		c.sawCancel = true
+		return false
+	}
+	if c.i > 0 && c.pace > 0 {
+		select {
+		case <-time.After(c.pace):
+		case <-c.ctx.Done():
+			c.sawCancel = true
+			return false
+		}
+	}
+	c.i++
+	return true
+}
+
+func (c *pacedCtxIter) Val() iter.Result[types.Record] { return c.vals[c.i-1] }
+
+func (c *pacedCtxIter) Close() error { return nil }
 
 func TestFindSingleRouterPath(t *testing.T) {
 	const (
