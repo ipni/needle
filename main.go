@@ -33,126 +33,126 @@ func main() {
 					&cli.StringFlag{
 						Name:    "listen-address",
 						Value:   "127.0.0.1:8190",
-						EnvVars: []string{"SOMEGUY_LISTEN_ADDRESS"},
+						EnvVars: []string{"NEEDLE_LISTEN_ADDRESS"},
 						Usage:   "listen address",
 					},
 					&cli.StringFlag{
 						Name:    "dht",
 						Value:   "accelerated",
-						EnvVars: []string{"SOMEGUY_DHT"},
+						EnvVars: []string{"NEEDLE_DHT"},
 						Usage:   "Amino DHT client mode: 'accelerated', 'standard', or 'disabled'",
 					},
 					&cli.DurationFlag{
 						Name:        "dht-find-peer-grace",
 						DefaultText: DefaultFindPeerGrace.String(),
 						Value:       DefaultFindPeerGrace,
-						EnvVars:     []string{"SOMEGUY_DHT_FIND_PEER_GRACE"},
+						EnvVars:     []string{"NEEDLE_DHT_FIND_PEER_GRACE"},
 						Usage:       "how long the accelerated DHT client keeps querying after the first peer reports a FindPeer target; 0 waits for every queried peer",
 					},
 					&cli.DurationFlag{
 						Name:        "dht-find-peer-dial-timeout",
 						DefaultText: DefaultFindPeerDialTimeout.String(),
 						Value:       DefaultFindPeerDialTimeout,
-						EnvVars:     []string{"SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT"},
-						Usage:       "budget for the background dial the accelerated DHT client starts after a FindPeer answer; 0 disables the dial. someguy caches addresses itself, so 0 is reasonable",
+						EnvVars:     []string{"NEEDLE_DHT_FIND_PEER_DIAL_TIMEOUT"},
+						Usage:       "budget for the background dial the accelerated DHT client starts after a FindPeer answer; 0 disables the dial. needle caches addresses itself, so 0 is reasonable",
 					},
 					&cli.BoolFlag{
 						Name:    "cached-addr-book",
 						Value:   true,
-						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK"},
+						EnvVars: []string{"NEEDLE_CACHED_ADDR_BOOK"},
 						Usage:   "use a cached address book to improve provider lookup responses",
 					},
 					&cli.BoolFlag{
 						Name:    "cached-addr-book-active-probing",
 						Value:   true,
-						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_ACTIVE_PROBING"},
+						EnvVars: []string{"NEEDLE_CACHED_ADDR_BOOK_ACTIVE_PROBING"},
 						Usage:   "actively probe peers in cache to keep their multiaddrs up to date",
 					},
 					&cli.DurationFlag{
 						Name:        "cached-addr-book-recent-ttl",
 						DefaultText: DefaultRecentlyConnectedAddrTTL.String(),
 						Value:       DefaultRecentlyConnectedAddrTTL,
-						EnvVars:     []string{"SOMEGUY_CACHED_ADDR_BOOK_RECENT_TTL"},
+						EnvVars:     []string{"NEEDLE_CACHED_ADDR_BOOK_RECENT_TTL"},
 						Usage:       "TTL for recently connected peers' multiaddrs in the cached address book",
 					},
 					&cli.IntFlag{
 						Name:        "cached-addr-book-max-concurrent-find-peers",
 						DefaultText: strconv.Itoa(DefaultMaxConcurrentFindPeers),
 						Value:       DefaultMaxConcurrentFindPeers,
-						EnvVars:     []string{"SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS"},
+						EnvVars:     []string{"NEEDLE_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS"},
 						Usage:       "maximum background FindPeer lookups running at once for provider records that arrive without addresses",
 					},
 					&cli.DurationFlag{
 						Name:    "cached-addr-book-negative-ttl",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL"},
+						EnvVars: []string{"NEEDLE_CACHED_ADDR_BOOK_NEGATIVE_TTL"},
 						Usage:   "how long a failed peer lookup suppresses further DHT lookups for that peer, answering /routing/v1/peers as not-found from the recorded failure; 0 disables",
 					},
 					&cli.DurationFlag{
 						Name:    "cached-addr-book-snapshot-interval",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL"},
+						EnvVars: []string{"NEEDLE_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL"},
 						Usage:   "how often to snapshot the cached address book to <datadir>/cached-addr-book.ndjson so a restart starts warm; 0 disables",
 					},
 					&cli.DurationFlag{
 						Name:    "dht-crawl-snapshot-max-age",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE"},
+						EnvVars: []string{"NEEDLE_DHT_CRAWL_SNAPSHOT_MAX_AGE"},
 						Usage:   "persist the accelerated DHT client's routing table to <datadir>/dht-crawl.ndjson after every crawl and replay it at startup if it is younger than this, so a restart is warm in seconds; 0 disables",
 					},
 					&cli.StringFlag{
 						Name:    "dnsaddr-resolution",
 						Value:   string(DNSAddrResolutionAppend),
-						EnvVars: []string{"SOMEGUY_DNSADDR_RESOLUTION"},
+						EnvVars: []string{"NEEDLE_DNSADDR_RESOLUTION"},
 						Usage:   "what an unfiltered response does with a /dnsaddr it resolved: 'append' (add the resolved addresses, keep the /dnsaddr), 'replace' (drop the /dnsaddr), 'filtered' (resolve only when the request sends filter-addrs), or 'never'; a request that sends filter-addrs gets it replaced in every resolving mode, unless the filter itself names dnsaddr",
 					},
 					&cli.DurationFlag{
 						Name:        "routing-timeout",
 						DefaultText: DefaultRoutingTimeout.String(),
 						Value:       DefaultRoutingTimeout,
-						EnvVars:     []string{"SOMEGUY_ROUTING_TIMEOUT"},
+						EnvVars:     []string{"NEEDLE_ROUTING_TIMEOUT"},
 						Usage:       "maximum time spent in the routers per /routing/v1 request; keep it below the timeout clients apply to the whole request",
 					},
 					&cli.IntFlag{
 						Name:    "records-limit",
 						Value:   DefaultRecordsLimit,
-						EnvVars: []string{"SOMEGUY_RECORDS_LIMIT"},
+						EnvVars: []string{"NEEDLE_RECORDS_LIMIT"},
 						Usage:   "maximum providers or peers per `Accept: application/json` request (HTTP Routing v1 section 4.1.5 recommends 100; 0 disables the cap)",
 					},
 					&cli.IntFlag{
 						Name:    "streaming-records-limit",
 						Value:   DefaultStreamingRecordsLimit,
-						EnvVars: []string{"SOMEGUY_STREAMING_RECORDS_LIMIT"},
+						EnvVars: []string{"NEEDLE_STREAMING_RECORDS_LIMIT"},
 						Usage:   "maximum providers or peers per `Accept: application/x-ndjson` request (0 disables the cap)",
 					},
 					&cli.StringSliceFlag{
 						Name:    "provider-endpoints",
 						Value:   cli.NewStringSlice(autoconf.AutoPlaceholder),
-						EnvVars: []string{"SOMEGUY_PROVIDER_ENDPOINTS"},
+						EnvVars: []string{"NEEDLE_PROVIDER_ENDPOINTS"},
 						Usage:   "additional Delegated Routing V1 endpoints for provider lookups",
 					},
 					&cli.StringSliceFlag{
 						Name:    "http-block-provider-endpoints",
 						Value:   nil,
-						EnvVars: []string{"SOMEGUY_HTTP_BLOCK_PROVIDER_ENDPOINTS"},
+						EnvVars: []string{"NEEDLE_HTTP_BLOCK_PROVIDER_ENDPOINTS"},
 						Usage:   "HTTP trustless gateway endpoints used to synthesize provider records",
 					},
 					&cli.StringSliceFlag{
 						Name:    "http-block-provider-peerids",
 						Value:   nil,
-						EnvVars: []string{"SOMEGUY_HTTP_BLOCK_PROVIDER_PEERIDS"},
+						EnvVars: []string{"NEEDLE_HTTP_BLOCK_PROVIDER_PEERIDS"},
 						Usage:   "PeerIDs to pair with --http-block-provider-endpoints (matching order)",
 					},
 					&cli.StringSliceFlag{
 						Name:    "peer-endpoints",
 						Value:   cli.NewStringSlice(autoconf.AutoPlaceholder),
-						EnvVars: []string{"SOMEGUY_PEER_ENDPOINTS"},
+						EnvVars: []string{"NEEDLE_PEER_ENDPOINTS"},
 						Usage:   "additional Delegated Routing V1 endpoints for peer lookups",
 					},
 					&cli.StringSliceFlag{
 						Name:    "ipns-endpoints",
 						Value:   cli.NewStringSlice(autoconf.AutoPlaceholder),
-						EnvVars: []string{"SOMEGUY_IPNS_ENDPOINTS"},
+						EnvVars: []string{"NEEDLE_IPNS_ENDPOINTS"},
 						Usage:   "additional Delegated Routing V1 endpoints for IPNS records",
 					},
 					&cli.StringSliceFlag{
@@ -173,97 +173,97 @@ func main() {
 							"/ip6/::/udp/4004/quic-v1",
 							"/ip6/::/udp/4004/webrtc-direct",
 							"/ip6/::/udp/4004/quic-v1/webtransport"),
-						EnvVars: []string{"SOMEGUY_LIBP2P_LISTEN_ADDRS"},
+						EnvVars: []string{"NEEDLE_LIBP2P_LISTEN_ADDRS"},
 						Usage:   "libp2p listen multiaddresses (comma-separated)",
 					},
 					&cli.IntFlag{
 						Name:    "libp2p-connmgr-low",
 						Value:   100,
-						EnvVars: []string{"SOMEGUY_LIBP2P_CONNMGR_LOW"},
+						EnvVars: []string{"NEEDLE_LIBP2P_CONNMGR_LOW"},
 						Usage:   "minimum number of libp2p connections to keep",
 					},
 					&cli.IntFlag{
 						Name:    "libp2p-connmgr-high",
 						Value:   3000,
-						EnvVars: []string{"SOMEGUY_LIBP2P_CONNMGR_HIGH"},
+						EnvVars: []string{"NEEDLE_LIBP2P_CONNMGR_HIGH"},
 						Usage:   "maximum number of libp2p connections to keep",
 					},
 					&cli.DurationFlag{
 						Name:    "libp2p-connmgr-grace",
 						Value:   time.Minute,
-						EnvVars: []string{"SOMEGUY_LIBP2P_CONNMGR_GRACE_PERIOD"},
+						EnvVars: []string{"NEEDLE_LIBP2P_CONNMGR_GRACE_PERIOD"},
 						Usage:   "minimum libp2p connection TTL",
 					},
 					&cli.Uint64Flag{
 						Name:    "libp2p-max-memory",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_LIBP2P_MAX_MEMORY"},
+						EnvVars: []string{"NEEDLE_LIBP2P_MAX_MEMORY"},
 						Usage:   "maximum memory to use for libp2p. Defaults to 85% of the system's available RAM",
 					},
 					&cli.Uint64Flag{
 						Name:    "libp2p-max-fd",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_LIBP2P_MAX_FD"},
+						EnvVars: []string{"NEEDLE_LIBP2P_MAX_FD"},
 						Usage:   "maximum number of file descriptors used by libp2p node. Defaults to 50% of the process' limit",
 					},
 					&cli.StringFlag{
 						Name:    "tracing-auth",
 						Value:   "",
-						EnvVars: []string{"SOMEGUY_TRACING_AUTH"},
+						EnvVars: []string{"NEEDLE_TRACING_AUTH"},
 						Usage:   "If set, requires clients to pass this value in the Authorization header before Traceparent is honored",
 					},
 					&cli.Float64Flag{
 						Name:    "sampling-fraction",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_SAMPLING_FRACTION"},
+						EnvVars: []string{"NEEDLE_SAMPLING_FRACTION"},
 						Usage:   "Fraction of routing requests to sample (0 to 1). Requests with Traceparent headers are always sampled, independent of this setting",
 					},
 					&cli.BoolFlag{
 						Name:    "pprof",
 						Value:   false,
-						EnvVars: []string{"SOMEGUY_PPROF"},
+						EnvVars: []string{"NEEDLE_PPROF"},
 						Usage:   "expose Go pprof profiles at /debug/pprof/ on the API address and enable mutex and block profile sampling",
 					},
 					&cli.BoolFlag{
 						Name:    "router-trace",
 						Value:   false,
-						EnvVars: []string{"SOMEGUY_ROUTER_TRACE"},
+						EnvVars: []string{"NEEDLE_ROUTER_TRACE"},
 						Usage:   "log one line per parallel routing request with per-router first-result, done and record counts; high volume, for experiments only",
 					},
 					&cli.DurationFlag{
 						Name:    "dht-tail-budget",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_DHT_TAIL_BUDGET"},
+						EnvVars: []string{"NEEDLE_DHT_TAIL_BUDGET"},
 						Usage:   "once every non-DHT router in a request has finished, give the DHT this much longer and then stop waiting for it; 0 disables. Requests served by the DHT alone are never cut.",
 					},
 					&cli.IntFlag{
 						Name:    "dht-tail-min-results",
 						Value:   0,
-						EnvVars: []string{"SOMEGUY_DHT_TAIL_MIN_RESULTS"},
+						EnvVars: []string{"NEEDLE_DHT_TAIL_MIN_RESULTS"},
 						Usage:   "floor of distinct providers below which the DHT tail cut holds the DHT open for another budget instead of cutting it; 0 (default) cuts on the first fire, exactly as before. A provider returned by more than one router counts once. The hold is bounded (at most 9 x dht-tail-budget after the last non-DHT router finishes), so a request that never reaches the floor still ends on its own schedule.",
 					},
 					&cli.StringFlag{
 						Name:    "datadir",
 						Value:   "",
-						EnvVars: []string{"SOMEGUY_DATADIR"},
+						EnvVars: []string{"NEEDLE_DATADIR"},
 						Usage:   "Directory for persistent data (autoconf cache)",
 					},
 					&cli.BoolFlag{
 						Name:    "autoconf",
 						Value:   true,
-						EnvVars: []string{"SOMEGUY_AUTOCONF"},
+						EnvVars: []string{"NEEDLE_AUTOCONF"},
 						Usage:   "Enable autoconf for bootstrap, DNS resolvers, and HTTP routers",
 					},
 					&cli.StringFlag{
 						Name:    "autoconf-url",
 						Value:   "https://conf.ipfs-mainnet.org/autoconf.json",
-						EnvVars: []string{"SOMEGUY_AUTOCONF_URL"},
+						EnvVars: []string{"NEEDLE_AUTOCONF_URL"},
 						Usage:   "URL to fetch autoconf data from",
 					},
 					&cli.DurationFlag{
 						Name:    "autoconf-refresh",
 						Value:   24 * time.Hour,
-						EnvVars: []string{"SOMEGUY_AUTOCONF_REFRESH"},
+						EnvVars: []string{"NEEDLE_AUTOCONF_REFRESH"},
 						Usage:   "How often to refresh autoconf data",
 					},
 				},
@@ -357,40 +357,40 @@ func main() {
 
 					fmt.Printf("Starting %s %s\n", name, version)
 
-					fmt.Printf("SOMEGUY_DHT = %s\n", cfg.dhtType)
+					fmt.Printf("NEEDLE_DHT = %s\n", cfg.dhtType)
 					if cfg.cachedAddrBookSnapshotInterval > 0 {
-						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL = %s\n", cfg.cachedAddrBookSnapshotInterval)
+						fmt.Printf("NEEDLE_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL = %s\n", cfg.cachedAddrBookSnapshotInterval)
 					}
 					if cfg.cachedAddrBookNegativeTTL > 0 {
-						fmt.Printf("SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL = %s\n", cfg.cachedAddrBookNegativeTTL)
+						fmt.Printf("NEEDLE_CACHED_ADDR_BOOK_NEGATIVE_TTL = %s\n", cfg.cachedAddrBookNegativeTTL)
 					}
 					if cfg.findPeerGrace != DefaultFindPeerGrace {
-						fmt.Printf("SOMEGUY_DHT_FIND_PEER_GRACE = %s\n", cfg.findPeerGrace)
+						fmt.Printf("NEEDLE_DHT_FIND_PEER_GRACE = %s\n", cfg.findPeerGrace)
 					}
 					if cfg.findPeerDialTimeout != DefaultFindPeerDialTimeout {
-						fmt.Printf("SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT = %s\n", cfg.findPeerDialTimeout)
+						fmt.Printf("NEEDLE_DHT_FIND_PEER_DIAL_TIMEOUT = %s\n", cfg.findPeerDialTimeout)
 					}
 					if cfg.dhtCrawlSnapshotMaxAge > 0 {
-						fmt.Printf("SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE = %s\n", cfg.dhtCrawlSnapshotMaxAge)
+						fmt.Printf("NEEDLE_DHT_CRAWL_SNAPSHOT_MAX_AGE = %s\n", cfg.dhtCrawlSnapshotMaxAge)
 					}
 					if cfg.pprof {
-						fmt.Printf("SOMEGUY_PPROF = true\n")
+						fmt.Printf("NEEDLE_PPROF = true\n")
 					}
 					if cfg.routerTrace {
-						fmt.Printf("SOMEGUY_ROUTER_TRACE = true\n")
+						fmt.Printf("NEEDLE_ROUTER_TRACE = true\n")
 					}
 					if cfg.dhtTailBudget > 0 {
-						fmt.Printf("SOMEGUY_DHT_TAIL_BUDGET = %s\n", cfg.dhtTailBudget)
+						fmt.Printf("NEEDLE_DHT_TAIL_BUDGET = %s\n", cfg.dhtTailBudget)
 					}
 					if cfg.dhtTailMinResults > 0 {
-						fmt.Printf("SOMEGUY_DHT_TAIL_MIN_RESULTS = %d\n", cfg.dhtTailMinResults)
+						fmt.Printf("NEEDLE_DHT_TAIL_MIN_RESULTS = %d\n", cfg.dhtTailMinResults)
 					}
-					printIfListConfigured("SOMEGUY_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
-					printIfListConfigured("SOMEGUY_PEER_ENDPOINTS = ", cfg.peerEndpoints)
-					printIfListConfigured("SOMEGUY_IPNS_ENDPOINTS = ", cfg.ipnsEndpoints)
+					printIfListConfigured("NEEDLE_PROVIDER_ENDPOINTS = ", cfg.contentEndpoints)
+					printIfListConfigured("NEEDLE_PEER_ENDPOINTS = ", cfg.peerEndpoints)
+					printIfListConfigured("NEEDLE_IPNS_ENDPOINTS = ", cfg.ipnsEndpoints)
 
 					if len(cfg.blockProviderEndpoints) > 0 && len(cfg.blockProviderPeerIDs) == 0 {
-						fmt.Printf("SOMEGUY_HTTP_BLOCK_PROVIDER_ENDPOINTS is set but SOMEGUY_HTTP_BLOCK_PROVIDER_PEERIDS were not. PeerIDs will be autogenerated.\n")
+						fmt.Printf("NEEDLE_HTTP_BLOCK_PROVIDER_ENDPOINTS is set but NEEDLE_HTTP_BLOCK_PROVIDER_PEERIDS were not. PeerIDs will be autogenerated.\n")
 						// Generate synthetic PeerIDs for HTTP block providers. These are deterministic
 						// identifiers based on endpoint URLs, used solely for routing system compatibility.
 						// Since HTTP providers use trustless gateway protocol, these PeerIDs are never
@@ -409,8 +409,8 @@ func main() {
 						}
 					}
 
-					printIfListConfigured("SOMEGUY_HTTP_BLOCK_PROVIDER_ENDPOINTS = ", cfg.blockProviderEndpoints)
-					printIfListConfigured("SOMEGUY_HTTP_BLOCK_PROVIDER_PEERIDS = ", cfg.blockProviderPeerIDs)
+					printIfListConfigured("NEEDLE_HTTP_BLOCK_PROVIDER_ENDPOINTS = ", cfg.blockProviderEndpoints)
+					printIfListConfigured("NEEDLE_HTTP_BLOCK_PROVIDER_PEERIDS = ", cfg.blockProviderPeerIDs)
 
 					return start(ctx.Context, cfg)
 				},
@@ -432,25 +432,25 @@ func main() {
 					&cli.StringFlag{
 						Name:    "datadir",
 						Value:   "",
-						EnvVars: []string{"SOMEGUY_DATADIR"},
+						EnvVars: []string{"NEEDLE_DATADIR"},
 						Usage:   "Directory for persistent data (autoconf cache)",
 					},
 					&cli.BoolFlag{
 						Name:    "autoconf",
 						Value:   true,
-						EnvVars: []string{"SOMEGUY_AUTOCONF"},
+						EnvVars: []string{"NEEDLE_AUTOCONF"},
 						Usage:   "Enable autoconf for bootstrap, DNS resolvers, and HTTP routers",
 					},
 					&cli.StringFlag{
 						Name:    "autoconf-url",
 						Value:   "https://conf.ipfs-mainnet.org/autoconf.json",
-						EnvVars: []string{"SOMEGUY_AUTOCONF_URL"},
+						EnvVars: []string{"NEEDLE_AUTOCONF_URL"},
 						Usage:   "URL to fetch autoconf data from",
 					},
 					&cli.DurationFlag{
 						Name:    "autoconf-refresh",
 						Value:   24 * time.Hour,
-						EnvVars: []string{"SOMEGUY_AUTOCONF_REFRESH"},
+						EnvVars: []string{"NEEDLE_AUTOCONF_REFRESH"},
 						Usage:   "How often to refresh autoconf data",
 					},
 				},
@@ -619,13 +619,13 @@ func snapshotFlagConfig(datadir string, cachedAddrBook bool, dhtType string, int
 		return "", 0, nil
 	}
 	if !cachedAddrBook {
-		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --cached-addr-book is disabled, so the snapshot would never be written; enable --cached-addr-book (SOMEGUY_CACHED_ADDR_BOOK) or set --cached-addr-book-snapshot-interval to 0 to disable the snapshot")
+		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --cached-addr-book is disabled, so the snapshot would never be written; enable --cached-addr-book (NEEDLE_CACHED_ADDR_BOOK) or set --cached-addr-book-snapshot-interval to 0 to disable the snapshot")
 	}
 	if dhtType == "disabled" {
-		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --dht is disabled; the cached address book only exists with a DHT, so enable one (SOMEGUY_DHT) or set --cached-addr-book-snapshot-interval to 0 to disable the snapshot")
+		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --dht is disabled; the cached address book only exists with a DHT, so enable one (NEEDLE_DHT) or set --cached-addr-book-snapshot-interval to 0 to disable the snapshot")
 	}
 	if datadir == "" {
-		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --datadir is empty; the snapshot is written to <datadir>/cached-addr-book.ndjson, so set --datadir (SOMEGUY_DATADIR) too, or set --cached-addr-book-snapshot-interval to 0 to disable it")
+		return "", 0, fmt.Errorf("--cached-addr-book-snapshot-interval is set but --datadir is empty; the snapshot is written to <datadir>/cached-addr-book.ndjson, so set --datadir (NEEDLE_DATADIR) too, or set --cached-addr-book-snapshot-interval to 0 to disable it")
 	}
 	return filepath.Join(datadir, "cached-addr-book.ndjson"), interval, nil
 }
@@ -644,10 +644,10 @@ func crawlSnapshotFlagConfig(datadir, dhtType string, maxAge time.Duration) (pat
 		return "", 0, nil
 	}
 	if dhtType != "accelerated" {
-		return "", 0, fmt.Errorf("--dht-crawl-snapshot-max-age is set but --dht is %s; only the accelerated client crawls a routing table to snapshot, so set --dht to accelerated (SOMEGUY_DHT) or set --dht-crawl-snapshot-max-age to 0 to disable the snapshot", dhtType)
+		return "", 0, fmt.Errorf("--dht-crawl-snapshot-max-age is set but --dht is %s; only the accelerated client crawls a routing table to snapshot, so set --dht to accelerated (NEEDLE_DHT) or set --dht-crawl-snapshot-max-age to 0 to disable the snapshot", dhtType)
 	}
 	if datadir == "" {
-		return "", 0, fmt.Errorf("--dht-crawl-snapshot-max-age is set but --datadir is empty; the snapshot is written to <datadir>/dht-crawl.ndjson, so set --datadir (SOMEGUY_DATADIR) too, or set --dht-crawl-snapshot-max-age to 0 to disable it")
+		return "", 0, fmt.Errorf("--dht-crawl-snapshot-max-age is set but --datadir is empty; the snapshot is written to <datadir>/dht-crawl.ndjson, so set --datadir (NEEDLE_DATADIR) too, or set --dht-crawl-snapshot-max-age to 0 to disable it")
 	}
 	return filepath.Join(datadir, "dht-crawl.ndjson"), maxAge, nil
 }

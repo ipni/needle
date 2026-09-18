@@ -95,7 +95,7 @@ var newDefaultCrawler = func(h host.Host) (crawler.Crawler, error) {
 // public, non-relay address in the peerstore, which is publicDialableAddr - the
 // same predicate the snapshot saves and loads with, so this accepts exactly the
 // peers the file vouches for. See its comment for where it is more permissive
-// than the address test inside the default, which someguy cannot call because
+// than the address test inside the default, which needle cannot call because
 // kad-dht does not export it.
 //
 // Outside a replay the filter is the upstream default, unchanged, so real

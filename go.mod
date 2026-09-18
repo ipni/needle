@@ -1,4 +1,4 @@
-module github.com/ipfs/someguy
+module github.com/ipni/needle
 
 go 1.26.0
 
@@ -162,7 +162,7 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-// Someguy pins one fork tag carrying two fullrt changes.
+// needle pins one fork tag carrying two fullrt changes.
 //
 // FindPeer: it used to gate its answer on a dial of the target and return
 // ErrNotFound when that dial failed, discarding addresses the network had just

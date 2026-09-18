@@ -539,7 +539,7 @@ func TestDNSAddrResolver(t *testing.T) {
 type dnsStubRouter struct {
 	router
 	recs []*types.PeerRecord
-	// raw is returned verbatim ahead of recs, for schemas someguy has no type
+	// raw is returned verbatim ahead of recs, for schemas needle has no type
 	// for.
 	raw []types.Record
 }
@@ -584,7 +584,7 @@ func (r bitswapStubRouter) FindProviders(context.Context, cid.Cid, int) (iter.Re
 	return iter.ToResultIter(iter.FromSlice([]types.Record{&cp})), nil
 }
 
-// The whole point of resolving is that boxo's filter, which runs after someguy
+// The whole point of resolving is that boxo's filter, which runs after needle
 // hands back a record, can then match on a real transport. This drives the real
 // HTTP handler to prove the ordering works end to end.
 func TestDNSAddrResolutionThroughHandler(t *testing.T) {
@@ -928,7 +928,7 @@ func TestDNSAddrCacheKey(t *testing.T) {
 	})
 }
 
-// The spec expects unknown schemas to survive a proxy: someguy is not the only
+// The spec expects unknown schemas to survive a proxy: needle is not the only
 // thing that may understand a record. Every layer that switches on schema
 // (sanitizeRouter, dnsAddrRouter, boxo's filter) has to fall through, and a
 // switch is easy to grow a case that swallows the rest.
@@ -967,16 +967,16 @@ func TestUnknownSchemaPassesThrough(t *testing.T) {
 		require.Len(t, got.Providers, 1, "query %q dropped the record", query)
 		require.Equal(t, "some-future-thing", got.Providers[0]["Schema"])
 		require.Equal(t, map[string]any{"k": "v"}, got.Providers[0]["Extra"],
-			"fields someguy does not understand must survive")
+			"fields needle does not understand must survive")
 		require.Equal(t, []any{"/dnsaddr/example.com"}, got.Providers[0]["Addrs"],
-			"someguy must not reach into a schema it does not know, even to resolve")
+			"needle must not reach into a schema it does not know, even to resolve")
 	}
 	require.Zero(t, s.distinct(), "an unknown schema costs no DNS lookup")
 }
 
-// A multiaddr may carry protocols someguy has no handling for. It must survive
+// A multiaddr may carry protocols needle has no handling for. It must survive
 // intact: not dropped, not reordered ahead of things a client should try first,
-// and never rewritten. Nothing here is special-cased anywhere in someguy, which
+// and never rewritten. Nothing here is special-cased anywhere in needle, which
 // is the point.
 func TestUnknownMultiaddrProtocolPassesThrough(t *testing.T) {
 	t.Parallel()
@@ -1019,12 +1019,12 @@ func TestUnknownMultiaddrProtocolPassesThrough(t *testing.T) {
 
 	t.Run("survives unchanged and sorts behind directly dialable addresses", func(t *testing.T) {
 		require.Equal(t, []string{ip, memory, onion}, get(""),
-			"unknown protocols are kept verbatim, ranked after ones someguy can place")
+			"unknown protocols are kept verbatim, ranked after ones needle can place")
 	})
 
 	t.Run("a filter naming the unknown protocol matches it", func(t *testing.T) {
 		require.Equal(t, []string{onion}, get("?filter-addrs=onion3"),
-			"filtering is by protocol component, so it works without someguy knowing the protocol")
+			"filtering is by protocol component, so it works without needle knowing the protocol")
 	})
 
 	t.Run("a filter not naming it excludes it", func(t *testing.T) {

@@ -1,4 +1,4 @@
-// autoconf.go implements automatic configuration for someguy.
+// autoconf.go implements automatic configuration for needle.
 //
 // Autoconf fetches network configuration from a remote JSON endpoint to automatically
 // configure bootstrap peers and delegated routing endpoints.
@@ -11,7 +11,7 @@
 //   - Filters out endpoints for systems running natively (e.g., DHT)
 //   - Validates and normalizes endpoint URLs
 //
-// See https://github.com/ipfs/someguy/blob/main/docs/environment-variables.md
+// See https://github.com/ipni/needle/blob/main/docs/environment-variables.md
 // for configuration options and defaults.
 package main
 
@@ -43,7 +43,7 @@ type autoConfConfig struct {
 	refreshInterval time.Duration
 
 	// cacheDir is the directory to cache autoconf data
-	// Default: $SOMEGUY_DATADIR/.autoconf-cache
+	// Default: $NEEDLE_DATADIR/.autoconf-cache
 	cacheDir string
 }
 
@@ -119,17 +119,17 @@ func validateEndpointURLs(urls []string, expectedPath, flagName, envVar string) 
 // expandDelegatedRoutingEndpoints expands autoconf placeholders and categorizes endpoints by path
 func expandDelegatedRoutingEndpoints(cfg *config, autoConf *autoconf.Config) error {
 	// Validate and normalize each flag's URLs separately
-	normalizedProviders, err := validateEndpointURLs(cfg.contentEndpoints, autoconf.RoutingV1ProvidersPath, "--provider-endpoints", "SOMEGUY_PROVIDER_ENDPOINTS")
+	normalizedProviders, err := validateEndpointURLs(cfg.contentEndpoints, autoconf.RoutingV1ProvidersPath, "--provider-endpoints", "NEEDLE_PROVIDER_ENDPOINTS")
 	if err != nil {
 		return err
 	}
 
-	normalizedPeers, err := validateEndpointURLs(cfg.peerEndpoints, autoconf.RoutingV1PeersPath, "--peer-endpoints", "SOMEGUY_PEER_ENDPOINTS")
+	normalizedPeers, err := validateEndpointURLs(cfg.peerEndpoints, autoconf.RoutingV1PeersPath, "--peer-endpoints", "NEEDLE_PEER_ENDPOINTS")
 	if err != nil {
 		return err
 	}
 
-	normalizedIPNS, err := validateEndpointURLs(cfg.ipnsEndpoints, autoconf.RoutingV1IPNSPath, "--ipns-endpoints", "SOMEGUY_IPNS_ENDPOINTS")
+	normalizedIPNS, err := validateEndpointURLs(cfg.ipnsEndpoints, autoconf.RoutingV1IPNSPath, "--ipns-endpoints", "NEEDLE_IPNS_ENDPOINTS")
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ func expandDelegatedRoutingEndpoints(cfg *config, autoConf *autoconf.Config) err
 		if slices.Contains(normalizedProviders, autoconf.AutoPlaceholder) ||
 			slices.Contains(normalizedPeers, autoconf.AutoPlaceholder) ||
 			slices.Contains(normalizedIPNS, autoconf.AutoPlaceholder) {
-			return fmt.Errorf("'auto' placeholder found in endpoint option but autoconf is disabled. Set explicit endpoint option with SOMEGUY_PROVIDER_ENDPOINTS/SOMEGUY_PEER_ENDPOINTS/SOMEGUY_IPNS_ENDPOINTS or --provider-endpoints/--peer-endpoints/--ipns-endpoints, or re-enable autoconf")
+			return fmt.Errorf("'auto' placeholder found in endpoint option but autoconf is disabled. Set explicit endpoint option with NEEDLE_PROVIDER_ENDPOINTS/NEEDLE_PEER_ENDPOINTS/NEEDLE_IPNS_ENDPOINTS or --provider-endpoints/--peer-endpoints/--ipns-endpoints, or re-enable autoconf")
 		}
 		// No autoconf, keep normalized endpoints as configured
 		cfg.contentEndpoints = deduplicateEndpoints(normalizedProviders)
@@ -241,7 +241,7 @@ func createAutoConfClient(cfg autoConfConfig) (*autoconf.Client, error) {
 
 	return autoconf.NewClient(
 		autoconf.WithCacheDir(cfg.cacheDir),
-		autoconf.WithUserAgent("someguy/"+version),
+		autoconf.WithUserAgent(name+"/"+version),
 		autoconf.WithCacheSize(autoconf.DefaultCacheSize),
 		autoconf.WithTimeout(autoconf.DefaultTimeout),
 		autoconf.WithURL(cfg.url),

@@ -54,7 +54,7 @@ var (
 
 	// findPeerLookupsRejected counts lookups skipped because the cap was
 	// reached. Any sustained increase means providers are being dropped that
-	// someguy would otherwise have resolved, so the cap needs raising or the
+	// needle would otherwise have resolved, so the cap needs raising or the
 	// traffic needs a closer look.
 	findPeerLookupsRejected = promauto.NewCounter(prometheus.CounterOpts{
 		Name:      "find_peer_lookups_rejected",
@@ -138,7 +138,7 @@ func (r cachedRouter) FindProviders(ctx context.Context, key cid.Cid, limit int)
 }
 
 // FindPeers serves addresses cache-first, the same way FindProviders does.
-// someguy is a caching routing proxy, not a libp2p node, so it favors a
+// needle is a caching routing proxy, not a libp2p node, so it favors a
 // low-latency answer drawn from recently seen, actively probed peers over a
 // fresh DHT walk on every request. It consults the cache first and falls back
 // to peer routing only on a miss. See docs/peer-address-caching.md.

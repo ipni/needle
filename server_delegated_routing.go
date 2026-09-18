@@ -61,7 +61,7 @@ func endpointLabel(baseURL string) string {
 func newDelegatedRoutingClient(endpoint string) (*drclient.Client, error) {
 	return drclient.New(
 		endpoint,
-		drclient.WithUserAgent("someguy/"+buildVersion()),
+		drclient.WithUserAgent(name+"/"+buildVersion()),
 		drclient.WithProtocolFilter([]string{}),
 		drclient.WithDisabledLocalFiltering(true),
 	)

@@ -4,7 +4,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/pbnjay/memory"
 
-	"github.com/ipfs/someguy/internal/fd"
+	"github.com/ipni/needle/internal/fd"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/network"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"

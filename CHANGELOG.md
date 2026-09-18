@@ -23,6 +23,12 @@ The following emojis are used to highlight certain changes:
 
 ### Security
 
+## [v1.0.0] - 2026-09-18
+
+### Changed
+
+- 🛠 Renamed the project from someguy to needle: the Go module path is now `github.com/ipni/needle`, the binary and image are `needle` (`ghcr.io/ipni/needle`), the env prefix is `NEEDLE_` (no `SOMEGUY_` aliases), the metric prefix is `needle_` (was `someguy_`), the User-Agent is `needle/<version>`, and the Docker data volume is `/data/needle`. See [`docs/environment-variables.md`](https://github.com/ipni/needle/blob/main/docs/environment-variables.md) and [`docs/metrics.md`](https://github.com/ipni/needle/blob/main/docs/metrics.md).
+
 ## [v0.16.0-ipni.2] - 2026-09-18
 
 ### Added

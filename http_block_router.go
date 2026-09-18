@@ -120,7 +120,7 @@ func defaultHTTPBlockRouterClient(insecureSkipVerify bool) *http.Client {
 		Transport: &drclient.ResponseBodyLimitedTransport{
 			RoundTripper: transport,
 			LimitBytes:   1 << 12, // max 4KiB -- should be plenty for HEAD response
-			UserAgent:    "someguy/" + buildVersion(),
+			UserAgent:    name + "/" + buildVersion(),
 		},
 	}
 }

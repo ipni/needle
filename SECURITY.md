@@ -23,6 +23,6 @@ something not yet released, it is fine to discuss it openly in an issue.
 
 ## Everything else
 
-For normal bugs, [open an issue](https://github.com/ipfs/someguy/issues/new/choose).
+For normal bugs, [open an issue](https://github.com/ipni/needle/issues/new/choose).
 
 This repository follows the [IPFS project security policy](https://github.com/ipfs/community/blob/master/SECURITY.md).

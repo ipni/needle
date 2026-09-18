@@ -11,7 +11,7 @@ import (
 //go:embed version.json
 var versionJSON []byte
 
-var name = "someguy"
+var name = "needle"
 var version = buildVersion()
 
 func buildVersion() string {

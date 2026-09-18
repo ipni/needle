@@ -72,7 +72,7 @@ func TestExpandDelegatedRoutingEndpoints(t *testing.T) {
 		err := expandDelegatedRoutingEndpoints(&cfg, nil)
 		require.Error(t, err, "should error when 'auto' is used with autoconf disabled")
 		assert.Contains(t, err.Error(), "'auto' placeholder found in endpoint option")
-		assert.Contains(t, err.Error(), "SOMEGUY_PROVIDER_ENDPOINTS")
+		assert.Contains(t, err.Error(), "NEEDLE_PROVIDER_ENDPOINTS")
 	})
 
 	t.Run("custom endpoints without paths preserved", func(t *testing.T) {
@@ -463,7 +463,7 @@ func TestValidateEndpointURLs(t *testing.T) {
 			urls:         []string{"https://a.com", "https://b.com/routing/v1/providers"},
 			expectedPath: autoconf.RoutingV1ProvidersPath,
 			flagName:     "--provider-endpoints",
-			envVar:       "SOMEGUY_PROVIDER_ENDPOINTS",
+			envVar:       "NEEDLE_PROVIDER_ENDPOINTS",
 			want:         []string{"https://a.com", "https://b.com"},
 			wantErr:      false,
 		},
@@ -472,7 +472,7 @@ func TestValidateEndpointURLs(t *testing.T) {
 			urls:         []string{autoconf.AutoPlaceholder},
 			expectedPath: autoconf.RoutingV1ProvidersPath,
 			flagName:     "--provider-endpoints",
-			envVar:       "SOMEGUY_PROVIDER_ENDPOINTS",
+			envVar:       "NEEDLE_PROVIDER_ENDPOINTS",
 			want:         []string{autoconf.AutoPlaceholder},
 			wantErr:      false,
 		},
@@ -481,7 +481,7 @@ func TestValidateEndpointURLs(t *testing.T) {
 			urls:         []string{autoconf.AutoPlaceholder, "https://custom.com"},
 			expectedPath: autoconf.RoutingV1ProvidersPath,
 			flagName:     "--provider-endpoints",
-			envVar:       "SOMEGUY_PROVIDER_ENDPOINTS",
+			envVar:       "NEEDLE_PROVIDER_ENDPOINTS",
 			want:         []string{autoconf.AutoPlaceholder, "https://custom.com"},
 			wantErr:      false,
 		},
@@ -490,17 +490,17 @@ func TestValidateEndpointURLs(t *testing.T) {
 			urls:         []string{"https://example.com/routing/v1/peers"},
 			expectedPath: autoconf.RoutingV1ProvidersPath,
 			flagName:     "--provider-endpoints",
-			envVar:       "SOMEGUY_PROVIDER_ENDPOINTS",
+			envVar:       "NEEDLE_PROVIDER_ENDPOINTS",
 			want:         nil,
 			wantErr:      true,
-			errContains:  []string{"SOMEGUY_PROVIDER_ENDPOINTS", "--provider-endpoints", "/routing/v1/peers"},
+			errContains:  []string{"NEEDLE_PROVIDER_ENDPOINTS", "--provider-endpoints", "/routing/v1/peers"},
 		},
 		{
 			name:         "empty URLs list",
 			urls:         []string{},
 			expectedPath: autoconf.RoutingV1ProvidersPath,
 			flagName:     "--provider-endpoints",
-			envVar:       "SOMEGUY_PROVIDER_ENDPOINTS",
+			envVar:       "NEEDLE_PROVIDER_ENDPOINTS",
 			want:         []string{},
 			wantErr:      false,
 		},
@@ -509,7 +509,7 @@ func TestValidateEndpointURLs(t *testing.T) {
 			urls:         []string{"https://a.com/routing/v1/providers/", "https://b.com/"},
 			expectedPath: autoconf.RoutingV1ProvidersPath,
 			flagName:     "--provider-endpoints",
-			envVar:       "SOMEGUY_PROVIDER_ENDPOINTS",
+			envVar:       "NEEDLE_PROVIDER_ENDPOINTS",
 			want:         []string{"https://a.com/routing/v1/providers/", "https://b.com/"},
 			wantErr:      false,
 		},

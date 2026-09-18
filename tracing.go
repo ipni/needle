@@ -74,8 +74,8 @@ func NewTracerProvider(ctx context.Context, traceFraction float64) (*trace.Trace
 			return !traceapi.SpanContextFromContext(parameters.ParentContext).IsValid()
 		}, "root sampler",
 			CascadingSamplerFunc(func(parameters trace.SamplingParameters) bool {
-				return strings.HasPrefix(parameters.Name, "someguy")
-			}, "someguy request sampler",
+				return strings.HasPrefix(parameters.Name, name)
+			}, name+" request sampler",
 				baseSampler)))
 
 	options = append(options, trace.WithResource(r), trace.WithSampler(sampler))
