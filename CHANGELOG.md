@@ -15,6 +15,18 @@ The following emojis are used to highlight certain changes:
 
 ### Added
 
+### Changed
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [v0.16.0-ipni.1] - 2026-09-18
+
+### Added
+
 - `SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL` (default `0`, disabled) answers `/routing/v1/peers` as not-found from a recently recorded lookup failure instead of repeating the DHT query, counted as `someguy_cached_router_peer_addr_lookups{cache="negative"}`. Concurrent requests for the same peer ID are now collapsed into a single DHT lookup regardless of the setting. See [`docs/environment-variables.md`](https://github.com/ipfs/someguy/blob/main/docs/environment-variables.md#someguy_cached_addr_book_negative_ttl).
 - `SOMEGUY_DHT_FIND_PEER_GRACE` and `SOMEGUY_DHT_FIND_PEER_DIAL_TIMEOUT` to tune the accelerated DHT client's `FindPeer`, which now answers `/routing/v1/peers` with the addresses the network reports instead of discarding them when a verification dial fails. Someguy pins `github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2` for the fix. See [`docs/environment-variables.md`](https://github.com/ipfs/someguy/blob/main/docs/environment-variables.md#someguy_dht_find_peer_grace).
 - Optional, off-by-default Go pprof endpoints at `/debug/pprof/` on the API address via `SOMEGUY_PPROF`, which also enables mutex and block profile sampling. See [`docs/environment-variables.md`](https://github.com/ipfs/someguy/blob/main/docs/environment-variables.md#someguy_pprof).
