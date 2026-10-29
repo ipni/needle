@@ -210,13 +210,19 @@ func main() {
 						Name:    "tracing-auth",
 						Value:   "",
 						EnvVars: []string{"NEEDLE_TRACING_AUTH"},
-						Usage:   "If set, requires clients to pass this value in the Authorization header before Traceparent is honored",
+						Usage:   "If set, a request whose Authorization header carries this value continues the trace in its Traceparent header",
+					},
+					&cli.BoolFlag{
+						Name:    "tracing-trust-traceparent",
+						Value:   false,
+						EnvVars: []string{"NEEDLE_TRACING_TRUST_TRACEPARENT"},
+						Usage:   "continue the trace in every request's Traceparent header; only for a server behind a proxy that replaces client Traceparent headers with its own",
 					},
 					&cli.Float64Flag{
 						Name:    "sampling-fraction",
 						Value:   0,
 						EnvVars: []string{"NEEDLE_SAMPLING_FRACTION"},
-						Usage:   "Fraction of routing requests to sample (0 to 1). Requests with Traceparent headers are always sampled, independent of this setting",
+						Usage:   "Fraction of routing requests without a trusted Traceparent to sample (0 to 1). A request with a trusted Traceparent follows its sampled flag instead",
 					},
 					&cli.BoolFlag{
 						Name:    "pprof",
@@ -340,12 +346,13 @@ func main() {
 						maxMemory:           ctx.Uint64("libp2p-max-memory"),
 						maxFD:               ctx.Int("libp2p-max-fd"),
 
-						tracingAuth:       ctx.String("tracing-auth"),
-						samplingFraction:  ctx.Float64("sampling-fraction"),
-						pprof:             ctx.Bool("pprof"),
-						routerTrace:       ctx.Bool("router-trace"),
-						dhtTailBudget:     dhtTailBudget,
-						dhtTailMinResults: dhtTailMinResults,
+						tracingAuth:             ctx.String("tracing-auth"),
+						tracingTrustTraceparent: ctx.Bool("tracing-trust-traceparent"),
+						samplingFraction:        ctx.Float64("sampling-fraction"),
+						pprof:                   ctx.Bool("pprof"),
+						routerTrace:             ctx.Bool("router-trace"),
+						dhtTailBudget:           dhtTailBudget,
+						dhtTailMinResults:       dhtTailMinResults,
 
 						autoConf: autoConfConfig{
 							enabled:         ctx.Bool("autoconf"),
@@ -378,6 +385,9 @@ func main() {
 					}
 					if cfg.routerTrace {
 						fmt.Printf("NEEDLE_ROUTER_TRACE = true\n")
+					}
+					if cfg.tracingTrustTraceparent {
+						fmt.Printf("NEEDLE_TRACING_TRUST_TRACEPARENT = true\n")
 					}
 					if cfg.dhtTailBudget > 0 {
 						fmt.Printf("NEEDLE_DHT_TAIL_BUDGET = %s\n", cfg.dhtTailBudget)

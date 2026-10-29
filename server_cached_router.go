@@ -143,8 +143,12 @@ func (r cachedRouter) FindProviders(ctx context.Context, key cid.Cid, limit int)
 // fresh DHT walk on every request. It consults the cache first and falls back
 // to peer routing only on a miss. See docs/peer-address-caching.md.
 func (r cachedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
+	// The counters belong to the request's router span, when it is traced.
+	counters := spanCountersFromContext(ctx)
+
 	// Cache-first: answer from the peerbook when we already hold addresses.
 	if cachedAddrs := r.withAddrsFromCache(addrQueryOriginPeers, pid, nil); len(cachedAddrs) > 0 {
+		counters.add(attrAddrBookHits, 1)
 		rec := &types.PeerRecord{
 			Schema: types.SchemaPeer,
 			ID:     &pid,
@@ -162,9 +166,12 @@ func (r cachedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (it
 			!pState.lastFailedConnTime.IsZero() &&
 			time.Since(pState.lastFailedConnTime) < r.negativeTTL {
 			peerAddrLookups.WithLabelValues(addrCacheStateNegative, addrQueryOriginPeers).Inc()
+			counters.add(attrAddrBookNegative, 1)
 			return nil, routing.ErrNotFound
 		}
 	}
+
+	counters.add(attrAddrBookMisses, 1)
 
 	// Cache miss: fall back to the underlying peer routing (DHT), collapsing
 	// concurrent requests for the same peer into one. A popular missing peer
@@ -215,6 +222,7 @@ func (r cachedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (it
 	})
 	if !startedLookup {
 		findPeerLookupsJoined.Inc()
+		counters.add(attrAddrBookJoined, 1)
 	}
 	if err != nil {
 		return nil, err
@@ -292,6 +300,7 @@ type cacheFallbackIter struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	ongoingLookups  atomic.Int32
+	counters        *spanCounters // the router span's, nil when not traced
 }
 
 // NewCacheFallbackIter is a wrapper around a results iterator that will resolve peers with no addresses from cache and if no cached addresses, will look them up via FindPeers.
@@ -308,6 +317,7 @@ func NewCacheFallbackIter(sourceIter iter.ResultIter[types.Record], router cache
 		cancel:          cancel,
 		findPeersResult: make(chan types.PeerRecord, 100), // Buffer to avoid drops in typical cases
 		ongoingLookups:  atomic.Int32{},
+		counters:        spanCountersFromContext(ctx),
 	}
 
 	return iter
@@ -324,6 +334,14 @@ func (it *cacheFallbackIter) Next() bool {
 				if record, ok := val.Val.(*types.PeerRecord); ok {
 					hadSourceAddrs := len(record.Addrs) > 0
 					record.Addrs = it.router.withAddrsFromCache(it.queryOrigin, *record.ID, record.Addrs)
+					switch {
+					case hadSourceAddrs:
+						it.counters.add(attrAddrBookUnused, 1)
+					case len(record.Addrs) > 0:
+						it.counters.add(attrAddrBookHits, 1)
+					default:
+						it.counters.add(attrAddrBookMisses, 1)
+					}
 					if len(record.Addrs) > 0 {
 						// Remember addresses observed in provider records so a later
 						// FindPeers for this peer can serve them from the peerbook.
@@ -343,6 +361,7 @@ func (it *cacheFallbackIter) Next() bool {
 					// the request times out.
 					if it.router.cachedAddrBook.ShouldProbePeer(*record.ID) && it.router.cachedAddrBook.tryAcquireFindPeerSlot() {
 						it.ongoingLookups.Add(1) // important to increment before dispatchFindPeer
+						it.counters.add(attrAddrBookDispatched, 1)
 						// If a record has no addrs, we dispatch a lookup to find addresses
 						go it.dispatchFindPeer(*record)
 					}
