@@ -26,6 +26,9 @@ import (
 	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	traceapi "go.opentelemetry.io/otel/trace"
 )
 
 type router interface {
@@ -118,6 +121,8 @@ const (
 	routerOpProviders = "providers"
 	routerOpPeers     = "peers"
 	routerOpClosest   = "closest"
+	routerOpIPNSGet   = "ipns_get"
+	routerOpIPNSPut   = "ipns_put"
 
 	// A router is "exhausted" when its iterator ran out, "cancelled" when the
 	// request ended under it - the records limit was reached, or the client
@@ -239,6 +244,8 @@ func unwrapRouter(r router) router {
 			r = v.router
 		case dnsAddrRouter:
 			r = v.router
+		case tracedRouter:
+			r = v.router
 		default:
 			return r
 		}
@@ -314,6 +321,16 @@ type routerTrace struct {
 	prevDone time.Duration
 	finished int
 
+	// ctx, spans and counters are set by traceSpans when the request is
+	// traced, and are nil otherwise. ctx is the context the request handed
+	// to the routers: its error when a router finishes tells a routing
+	// timeout from a client that went away.
+	ctx      context.Context
+	spans    []traceapi.Span
+	counters []*spanCounters
+	errs     []int
+	outcomes []string
+
 	once sync.Once
 }
 
@@ -333,6 +350,17 @@ func newRouterTrace(op string, names []string, start time.Time, log bool) *route
 		rt.first[i] = -1
 	}
 	return rt
+}
+
+// traceSpans hands the trace one span per router, which it ends when the
+// request ends, carrying what the trace measured: records, exclusive records,
+// errors, the first record's time and how the router finished.
+func (rt *routerTrace) traceSpans(ctx context.Context, spans []traceapi.Span, counters []*spanCounters) {
+	rt.ctx = ctx
+	rt.spans = spans
+	rt.counters = counters
+	rt.errs = make([]int, len(rt.names))
+	rt.outcomes = make([]string, len(rt.names))
 }
 
 // record notes one record forwarded by router i. It is called after the send
@@ -364,7 +392,21 @@ func (rt *routerTrace) record(i int, v any) {
 	routerRecords.WithLabelValues(rt.op, rt.names[i]).Inc()
 	if isFirst {
 		routerFirstResult.WithLabelValues(rt.op, rt.names[i]).Observe(elapsed.Seconds())
+		if rt.spans != nil {
+			rt.spans[i].AddEvent("first record")
+		}
 	}
+}
+
+// recordErr notes one error result forwarded by router i. Only the span sees
+// it; a cancellation is how a router ends, not a failure, and is not counted.
+func (rt *routerTrace) recordErr(i int, err error) {
+	if rt == nil || rt.spans == nil || isContextErr(err) {
+		return
+	}
+	rt.mu.Lock()
+	rt.errs[i]++
+	rt.mu.Unlock()
 }
 
 // finish notes that router i's goroutine has exited, with the reason:
@@ -387,6 +429,9 @@ func (rt *routerTrace) finish(i int, reason string) {
 	rt.lastDone = elapsed
 	rt.lastIdx = i
 	rt.finished++
+	if rt.spans != nil {
+		rt.outcomes[i] = routerOutcome(reason, rt.ctx)
+	}
 	rt.mu.Unlock()
 
 	routerDone.WithLabelValues(rt.op, rt.names[i], reason).Observe(elapsed.Seconds())
@@ -412,6 +457,8 @@ type routerTraceSnapshot struct {
 	done      []time.Duration
 	records   []int
 	exclusive []int
+	errs      []int
+	outcomes  []string
 	lastIdx   int
 	lastDone  time.Duration
 	prevDone  time.Duration
@@ -433,6 +480,8 @@ func (rt *routerTrace) snapshot() routerTraceSnapshot {
 		done:      slices.Clone(rt.done),
 		records:   slices.Clone(rt.records),
 		exclusive: exclusive,
+		errs:      slices.Clone(rt.errs),
+		outcomes:  slices.Clone(rt.outcomes),
 		lastIdx:   rt.lastIdx,
 		lastDone:  rt.lastDone,
 		prevDone:  rt.prevDone,
@@ -442,6 +491,7 @@ func (rt *routerTrace) snapshot() routerTraceSnapshot {
 
 func (rt *routerTrace) emit(reason string) {
 	snap := rt.snapshot()
+	rt.endSpans(snap, reason)
 
 	for i, n := range rt.names {
 		if snap.exclusive[i] > 0 {
@@ -460,6 +510,45 @@ func (rt *routerTrace) emit(reason string) {
 		return
 	}
 	logger.Infow("parallel routing request", rt.traceFields(snap, reason)...)
+}
+
+// endSpans ends every router's span at the moment that router finished, with
+// what it contributed, and notes the request-level outcome on the request's
+// span. It runs at finalize rather than as each router finishes, because
+// exclusive records are only known once every router is done.
+func (rt *routerTrace) endSpans(snap routerTraceSnapshot, reason string) {
+	if rt.spans == nil {
+		return
+	}
+	for i, span := range rt.spans {
+		attrs := []attribute.KeyValue{
+			attrRouterRecords.Int(snap.records[i]),
+			attrRouterExclusive.Int(snap.exclusive[i]),
+			attrRouterErrors.Int(snap.errs[i]),
+			attrRouterOutcome.String(snap.outcomes[i]),
+		}
+		if snap.first[i] >= 0 {
+			attrs = append(attrs, attrRouterFirstMs.Int64(durationMillis(snap.first[i])))
+		}
+		span.SetAttributes(attrs...)
+		span.SetAttributes(rt.counters[i].attributes()...)
+		if snap.errs[i] > 0 {
+			span.SetStatus(codes.Error, fmt.Sprintf("%d error results", snap.errs[i]))
+		}
+		span.End(traceapi.WithTimestamp(rt.start.Add(snap.done[i])))
+	}
+
+	attrs := []attribute.KeyValue{
+		attrRoutingOutcome.String(routerOutcome(reason, rt.ctx)),
+		attrRoutingRouters.Int(len(rt.names)),
+	}
+	if snap.finished > 1 && snap.lastIdx >= 0 {
+		attrs = append(attrs,
+			attrRoutingLastRouter.String(rt.names[snap.lastIdx]),
+			attrRoutingTailMs.Int64(durationMillis(snap.lastDone-snap.prevDone)),
+		)
+	}
+	traceapi.SpanFromContext(rt.ctx).SetAttributes(attrs...)
 }
 
 // traceFields is the one trace line's payload: the request as a whole, then
@@ -527,31 +616,43 @@ func find[T any](ctx context.Context, routers []router, op string, trace bool, d
 	case 0:
 		return iter.ToResultIter(iter.FromSlice([]T{})), nil
 	case 1:
-		return call(routers[0], ctx)
+		return traceSingle(ctx, op, routerName(routers[0]), func(ctx context.Context) (iter.ResultIter[T], error) {
+			return call(routers[0], ctx)
+		})
 	}
 
 	its := make([]iter.ResultIter[T], 0, len(routers))
 	names := make([]string, 0, len(routers))
 	cuttable := make([]bool, 0, len(routers))
 	cancels := make([]context.CancelFunc, 0, len(routers))
+	traced := traceapi.SpanFromContext(ctx).IsRecording()
+	var spans []traceapi.Span
+	var counters []*spanCounters
 	var err error
 	for _, ri := range routers {
+		rname := routerName(ri)
 		// Each router gets its own context so the DHT tail cut can cancel the
 		// DHT alone. Cancelling a finished iterator's context is harmless, so
 		// every one is kept until Close.
 		rctx, rcancel := context.WithCancel(ctx)
+		rctx, span, rcounters := startRouterSpan(rctx, op, rname)
 		it, itErr := call(ri, rctx)
 
 		if itErr != nil {
 			rcancel()
+			endRouterCall(span, rcounters, ctx, itErr, attrRouterRecords.Int(0))
 			logger.Warnf("error from router: %w", itErr)
 			err = errors.Join(err, itErr)
 		} else {
 			its = append(its, it)
-			names = append(names, routerName(ri))
+			names = append(names, rname)
 			_, isDHT := unwrapRouter(ri).(dhtMarker)
 			cuttable = append(cuttable, isDHT)
 			cancels = append(cancels, rcancel)
+			if traced {
+				spans = append(spans, span)
+				counters = append(counters, rcounters)
+			}
 		}
 	}
 
@@ -564,7 +665,114 @@ func find[T any](ctx context.Context, routers []router, op string, trace bool, d
 	}
 
 	// Otherwise return manyIter with remaining iterators.
-	return newManyIter(ctx, its, cancels, cuttable, dhtTailBudget, dhtTailMinResults, newRouterTrace(op, names, start, trace)), nil
+	rt := newRouterTrace(op, names, start, trace)
+	if traced {
+		rt.traceSpans(ctx, spans, counters)
+	}
+	return newManyIter(ctx, its, cancels, cuttable, dhtTailBudget, dhtTailMinResults, rt), nil
+}
+
+// endRouterCall ends the span of a router call that returned err instead of
+// records. Not found is an answer, and a cancellation is how the request
+// ended, so only any other error marks the span as failed. reqCtx is the
+// context the request handed to the routers.
+func endRouterCall(span traceapi.Span, counters *spanCounters, reqCtx context.Context, err error, attrs ...attribute.KeyValue) {
+	if !span.IsRecording() {
+		return
+	}
+	outcome := routerDoneExhausted
+	switch {
+	case err == nil, errors.Is(err, routing.ErrNotFound), errors.Is(err, routing.ErrNotSupported):
+	case isContextErr(err) || reqCtx.Err() != nil:
+		outcome = routerOutcome(routerDoneCancelled, reqCtx)
+	default:
+		outcome = routerOutcomeError
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.SetAttributes(append(attrs, attrRouterOutcome.String(outcome))...)
+	span.SetAttributes(counters.attributes()...)
+	span.End()
+}
+
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// traceSingle traces a request answered by one router, which find hands
+// straight to the caller instead of fanning it out through manyIter, so
+// there is no routerTrace to measure it. The iterator is wrapped to count
+// what it yields and to end the span when it runs out or is closed.
+func traceSingle[T any](ctx context.Context, op, name string, call func(context.Context) (iter.ResultIter[T], error)) (iter.ResultIter[T], error) {
+	rctx, span, counters := startRouterSpan(ctx, op, name)
+	if !span.IsRecording() {
+		return call(ctx)
+	}
+	start := time.Now()
+	it, err := call(rctx)
+	if err != nil {
+		endRouterCall(span, counters, ctx, err, attrRouterRecords.Int(0))
+		return nil, err
+	}
+	return &tracedIter[T]{ResultIter: it, span: span, reqCtx: ctx, counters: counters, start: start}, nil
+}
+
+// tracedIter is one router's iterator in a traced single-router request. Like
+// every ResultIter it is used from one goroutine, so it needs no lock.
+type tracedIter[T any] struct {
+	iter.ResultIter[T]
+	span     traceapi.Span
+	reqCtx   context.Context
+	counters *spanCounters
+	start    time.Time
+	records  int
+	errs     int
+	ended    bool
+}
+
+func (it *tracedIter[T]) Next() bool {
+	if !it.ResultIter.Next() {
+		reason := routerDoneExhausted
+		if it.reqCtx.Err() != nil {
+			reason = routerDoneCancelled
+		}
+		it.end(reason)
+		return false
+	}
+	if v := it.ResultIter.Val(); v.Err != nil {
+		if !isContextErr(v.Err) {
+			it.errs++
+		}
+	} else {
+		if it.records == 0 {
+			it.span.AddEvent("first record")
+			it.span.SetAttributes(attrRouterFirstMs.Int64(time.Since(it.start).Milliseconds()))
+		}
+		it.records++
+	}
+	return true
+}
+
+func (it *tracedIter[T]) Close() error {
+	it.end(routerDoneCancelled)
+	return it.ResultIter.Close()
+}
+
+func (it *tracedIter[T]) end(reason string) {
+	if it.ended {
+		return
+	}
+	it.ended = true
+	it.span.SetAttributes(
+		attrRouterRecords.Int(it.records),
+		attrRouterErrors.Int(it.errs),
+		attrRouterOutcome.String(routerOutcome(reason, it.reqCtx)),
+	)
+	it.span.SetAttributes(it.counters.attributes()...)
+	if it.errs > 0 {
+		it.span.SetStatus(codes.Error, fmt.Sprintf("%d error results", it.errs))
+	}
+	it.span.End()
 }
 
 func (r parallelRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
@@ -696,6 +904,8 @@ func newManyIter[T any](ctx context.Context, its []iter.ResultIter[T], cancels [
 					if val.Err == nil {
 						mi.noteDistinct(val.Val)
 						trace.record(i, val.Val)
+					} else {
+						trace.recordErr(i, val.Err)
 					}
 				case <-ctx.Done():
 					trace.finish(i, mi.finishReason(i))
@@ -1007,12 +1217,23 @@ func isExpiredIPNSRecord(rec *ipns.Record) bool {
 	return time.Now().After(validity)
 }
 
+// routerGetIPNS asks one router for an IPNS record, under a span of its own when
+// the request is traced. reqCtx is the context the request handed to the
+// routers, which ctx may be a cancellable child of.
+func routerGetIPNS(ctx, reqCtx context.Context, ri router, name ipns.Name) (*ipns.Record, error) {
+	ctx, span, counters := startRouterSpan(ctx, routerOpIPNSGet, routerName(ri))
+	rec, err := ri.GetIPNS(ctx, name)
+	found := err == nil && rec != nil && !isExpiredIPNSRecord(rec)
+	endRouterCall(span, counters, reqCtx, err, attrRouterFound.Bool(found))
+	return rec, err
+}
+
 func (r parallelRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Record, error) {
 	switch len(r.routers) {
 	case 0:
 		return nil, routing.ErrNotFound
 	case 1:
-		rec, err := r.routers[0].GetIPNS(ctx, name)
+		rec, err := routerGetIPNS(ctx, ctx, r.routers[0], name)
 		if err != nil {
 			return nil, err
 		}
@@ -1022,6 +1243,7 @@ func (r parallelRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Reco
 		return rec, nil
 	}
 
+	reqCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -1031,7 +1253,7 @@ func (r parallelRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Reco
 	})
 	for _, ri := range r.routers {
 		go func(ri router) {
-			value, err := ri.GetIPNS(ctx, name)
+			value, err := routerGetIPNS(ctx, reqCtx, ri, name)
 			select {
 			case results <- struct {
 				val *ipns.Record
@@ -1080,14 +1302,24 @@ func (r parallelRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Reco
 	return nil, errs
 }
 
+// routerPutIPNS hands one router an IPNS record, under a span of its own when the
+// request is traced.
+func routerPutIPNS(ctx, reqCtx context.Context, ri router, name ipns.Name, record *ipns.Record) error {
+	ctx, span, counters := startRouterSpan(ctx, routerOpIPNSPut, routerName(ri))
+	err := ri.PutIPNS(ctx, name, record)
+	endRouterCall(span, counters, reqCtx, err)
+	return err
+}
+
 func (r parallelRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.Record) error {
 	switch len(r.routers) {
 	case 0:
 		return nil
 	case 1:
-		return r.routers[0].PutIPNS(ctx, name, record)
+		return routerPutIPNS(ctx, ctx, r.routers[0], name, record)
 	}
 
+	reqCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -1096,7 +1328,7 @@ func (r parallelRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipn
 	wg.Add(len(r.routers))
 	for i, ri := range r.routers {
 		go func(ri router, i int) {
-			results[i] = ri.PutIPNS(ctx, name, record)
+			results[i] = routerPutIPNS(ctx, reqCtx, ri, name, record)
 			wg.Done()
 		}(ri, i)
 	}
@@ -1124,7 +1356,7 @@ type libp2pRouter struct {
 func (libp2pRouter) isDHT() {}
 
 func (d libp2pRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(untraced(ctx))
 	ch := d.routing.FindProvidersAsync(ctx, key, limit)
 	return iter.ToResultIter(&peerChanIter{
 		ch:     ch,
@@ -1133,7 +1365,7 @@ func (d libp2pRouter) FindProviders(ctx context.Context, key cid.Cid, limit int)
 }
 
 func (d libp2pRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(untraced(ctx))
 	defer cancel()
 
 	addr, err := d.routing.FindPeer(ctx, pid)
@@ -1154,6 +1386,8 @@ func (d libp2pRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (it
 }
 
 func (d libp2pRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
+	ctx = untraced(ctx)
+
 	// Per the spec, if the peer ID is empty, we should use self.
 	if key == cid.Undef {
 		return nil, errors.New("GetClosestPeers: key is undefined")
@@ -1225,7 +1459,7 @@ func (d libp2pRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.Re
 }
 
 func (d libp2pRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Record, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(untraced(ctx))
 	defer cancel()
 
 	raw, err := d.routing.GetValue(ctx, string(name.RoutingKey()))
@@ -1237,7 +1471,7 @@ func (d libp2pRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Record
 }
 
 func (d libp2pRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.Record) error {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(untraced(ctx))
 	defer cancel()
 
 	raw, err := ipns.MarshalRecord(record)
@@ -1246,6 +1480,46 @@ func (d libp2pRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.
 	}
 
 	return d.routing.PutValue(ctx, string(name.RoutingKey()), raw)
+}
+
+// tracedRouter gives a router that is not fanned out through parallelRouter -
+// the DHT, when no delegated endpoint serves an operation - the router span
+// parallelRouter would have given it. It changes nothing else.
+type tracedRouter struct {
+	router
+	name string
+}
+
+var _ router = tracedRouter{}
+
+func newTracedRouter(r router) tracedRouter {
+	return tracedRouter{router: r, name: routerName(r)}
+}
+
+func (r tracedRouter) FindProviders(ctx context.Context, key cid.Cid, limit int) (iter.ResultIter[types.Record], error) {
+	return traceSingle(ctx, routerOpProviders, r.name, func(ctx context.Context) (iter.ResultIter[types.Record], error) {
+		return r.router.FindProviders(ctx, key, limit)
+	})
+}
+
+func (r tracedRouter) FindPeers(ctx context.Context, pid peer.ID, limit int) (iter.ResultIter[*types.PeerRecord], error) {
+	return traceSingle(ctx, routerOpPeers, r.name, func(ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
+		return r.router.FindPeers(ctx, pid, limit)
+	})
+}
+
+func (r tracedRouter) GetClosestPeers(ctx context.Context, key cid.Cid) (iter.ResultIter[*types.PeerRecord], error) {
+	return traceSingle(ctx, routerOpClosest, r.name, func(ctx context.Context) (iter.ResultIter[*types.PeerRecord], error) {
+		return r.router.GetClosestPeers(ctx, key)
+	})
+}
+
+func (r tracedRouter) GetIPNS(ctx context.Context, name ipns.Name) (*ipns.Record, error) {
+	return routerGetIPNS(ctx, ctx, r.router, name)
+}
+
+func (r tracedRouter) PutIPNS(ctx context.Context, name ipns.Name, record *ipns.Record) error {
+	return routerPutIPNS(ctx, ctx, r.router, name, record)
 }
 
 type peerChanIter struct {

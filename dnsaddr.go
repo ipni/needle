@@ -16,6 +16,8 @@ import (
 	madns "github.com/multiformats/go-multiaddr-dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	traceapi "go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -213,8 +215,12 @@ func resolvableDNSAddr(addr ma.Multiaddr) bool {
 func (d *dnsAddrResolver) lookup(ctx context.Context, addr ma.Multiaddr, budget *dnsAddrBudget) (addrs []ma.Multiaddr, ok bool) {
 	key := dnsAddrCacheKey(addr)
 
+	// The counters belong to the request's span, when it is traced.
+	counters := spanCountersFromContext(ctx)
+
 	if entry, found := d.cache.Get(key); found && time.Now().Before(entry.expires) {
 		dnsAddrResolutions.WithLabelValues(dnsAddrResultHit).Inc()
+		counters.add(attrDNSAddrCacheHits, 1)
 		return entry.addrs, entry.ok
 	}
 
@@ -224,7 +230,18 @@ func (d *dnsAddrResolver) lookup(ctx context.Context, addr ma.Multiaddr, budget 
 		return nil, false
 	}
 	if !budget.spend() {
+		counters.add(attrDNSAddrThrottled, 1)
 		return nil, false
+	}
+	counters.add(attrDNSAddrLookups, 1)
+
+	// One span per query this request waits on, which is at most
+	// MaxDNSAddrLookupsPerRequest. shared is true when the query was already
+	// in flight for another request and this one joined it.
+	span := traceapi.SpanFromContext(context.Background()) // no-op unless traced
+	if parent := traceapi.SpanFromContext(ctx); parent.IsRecording() {
+		_, span = parent.TracerProvider().Tracer(tracerName).Start(ctx, name+" dnsaddr lookup",
+			traceapi.WithAttributes(semconv.DNSQuestionName(key)))
 	}
 
 	// The query runs detached from the request context, deduped with other
@@ -238,10 +255,21 @@ func (d *dnsAddrResolver) lookup(ctx context.Context, addr ma.Multiaddr, budget 
 	select {
 	case res := <-ch:
 		entry, _ := res.Val.(dnsAddrCacheEntry)
+		result := dnsAddrResultResolved
+		switch {
+		case !entry.ok:
+			result = dnsAddrResultFailed
+		case len(entry.addrs) == 0:
+			result = dnsAddrResultEmpty
+		}
+		span.SetAttributes(attrDNSAddrResult.String(result), attrDNSAddrAddrs.Int(len(entry.addrs)), attrDNSAddrShared.Bool(res.Shared))
+		span.End()
 		return entry.addrs, entry.ok
 	case <-ctx.Done():
 		// The response this lookup was for is gone. The query keeps running so
 		// the answer still lands in the cache, but this expansion is not whole.
+		span.SetAttributes(attrDNSAddrResult.String(routerOutcome(routerDoneCancelled, ctx)))
+		span.End()
 		return nil, false
 	}
 }
