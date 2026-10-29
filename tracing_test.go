@@ -147,7 +147,7 @@ func TestResourceHonoursOTELEnv(t *testing.T) {
 	require.NoError(t, err)
 	attrs := map[attribute.Key]string{}
 	for _, kv := range r.Attributes() {
-		attrs[kv.Key] = kv.Value.Emit()
+		attrs[kv.Key] = kv.Value.String()
 	}
 	assert.Equal(t, "needle-canary", attrs["service.name"])
 	assert.Equal(t, "test", attrs["deployment.environment"])
