@@ -34,7 +34,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
 	"go.opencensus.io/stats/view"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var logger = logging.Logger(name)
@@ -141,12 +140,13 @@ type config struct {
 	maxMemory           uint64
 	maxFD               int
 
-	tracingAuth       string
-	samplingFraction  float64
-	pprof             bool
-	routerTrace       bool
-	dhtTailBudget     time.Duration
-	dhtTailMinResults int
+	tracingAuth             string
+	tracingTrustTraceparent bool
+	samplingFraction        float64
+	pprof                   bool
+	routerTrace             bool
+	dhtTailBudget           time.Duration
+	dhtTailMinResults       int
 
 	autoConf autoConfConfig
 }
@@ -329,6 +329,7 @@ func start(ctx context.Context, cfg *config) error {
 		dhtRouters = sanitizeRouter{libp2pRouter{host: h, routing: dhtRouting}}
 	}
 	if dhtRouters != nil {
+		dhtRouters = newTracedRouter(dhtRouters)
 		// Peerstore addresses can carry /dnsaddr too (learned via identify),
 		// so the closest-peers endpoint resolves like the other endpoints.
 		dhtRouters = withDNSAddrResolution(dhtRouters, dnsAddr, cfg.dnsAddrResolution)
@@ -339,7 +340,7 @@ func start(ctx context.Context, cfg *config) error {
 		return err
 	}
 
-	tp, err := setupTracing(ctx, cfg.samplingFraction)
+	tp, err := setupTracing(ctx, cfg.samplingFraction, cfg.listenAddress)
 	if err != nil {
 		return err
 	}
@@ -391,7 +392,7 @@ func start(ctx context.Context, cfg *config) error {
 	handler = withRequestLogger(handler)
 
 	// Add request tracing
-	handler = withTracingAndDebug(handler, cfg.tracingAuth)
+	handler = withTracing(handler, cfg.tracingAuth, cfg.tracingTrustTraceparent)
 
 	if cfg.pprof {
 		fmt.Printf("pprof: http://127.0.0.1:%s/debug/pprof/\n", port)
@@ -510,7 +511,7 @@ func combineRouters(h host.Host, dht routing.Routing, cachedAddrBook *cachedAddr
 		if dhtRouter == nil {
 			return composableRouter{}
 		}
-		return withDNSAddrResolution(dhtRouter, dnsAddr, dnsAddrMode)
+		return withDNSAddrResolution(newTracedRouter(dhtRouter), dnsAddr, dnsAddrMode)
 	}
 
 	var routers []router
@@ -531,23 +532,4 @@ func withDNSAddrResolution(r router, resolver *dnsAddrResolver, mode DNSAddrReso
 		return r
 	}
 	return dnsAddrRouter{router: r, resolver: resolver, mode: mode}
-}
-
-func withTracingAndDebug(next http.Handler, authToken string) http.Handler {
-	next = otelhttp.NewHandler(next, name+".request")
-
-	// Remove tracing and cache skipping headers if not authorized
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		// Disable tracing/debug headers if auth token missing or invalid
-		if authToken == "" || request.Header.Get("Authorization") != authToken {
-			if request.Header.Get("Traceparent") != "" {
-				request.Header.Del("Traceparent")
-			}
-			if request.Header.Get("Tracestate") != "" {
-				request.Header.Del("Tracestate")
-			}
-		}
-
-		next.ServeHTTP(writer, request)
-	})
 }

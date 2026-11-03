@@ -15,11 +15,21 @@ The following emojis are used to highlight certain changes:
 
 ### Added
 
+- ✨ OpenTelemetry traces now show the work inside a request: one child span per router asked (`needle router <op> <router>`, for example `needle router providers delegated:cid.contact`) with its records, exclusive records, first-record time, errors and how it finished (`exhausted`, `cut`, `timeout`, `client_cancelled`, `closed`, `error`), cached address book counts on the DHT's span, and a span per `/dnsaddr` DNS query. A request served by the DHT alone gets its router span too. The DHT library's own per-peer query spans, a few hundred per provider lookup, are kept out of request traces. See [`docs/tracing.md`](https://github.com/ipni/needle/blob/main/docs/tracing.md#what-a-trace-shows).
+- `NEEDLE_TRACING_TRUST_TRACEPARENT` (default `false`) continues the trace in every request's `Traceparent`, for a needle that is reachable only through a proxy that replaces client `Traceparent` headers with its own. See [`docs/tracing.md`](https://github.com/ipni/needle/blob/main/docs/tracing.md#behind-a-proxy).
+
 ### Changed
+
+- The request span is named after the endpoint, for example `needle GET /routing/v1/providers/{cid}`, instead of `GET /`, and carries `http.route`.
+- A request whose `Traceparent` is not trusted (no `NEEDLE_TRACING_TRUST_TRACEPARENT`, no matching `NEEDLE_TRACING_AUTH`) now starts a new trace sampled at `NEEDLE_SAMPLING_FRACTION` and keeps the trace it named as a span link; the header was previously deleted.
+- `service.instance.id` defaults to `<hostname>:<API port>`, and setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone now exports over OTLP (`OTEL_TRACES_EXPORTER` defaults to `otlp` when an endpoint is set). With no exporter configured nothing is sampled.
 
 ### Removed
 
 ### Fixed
+
+- `NEEDLE_SAMPLING_FRACTION` sampled nothing: the root sampler only kept spans whose name started with `needle`, and otelhttp names the server span `GET /`. Requests without a trusted parent are now sampled at the fraction.
+- `OTEL_SERVICE_NAME` and the `service.name`/`service.version` keys of `OTEL_RESOURCE_ATTRIBUTES` were overridden by needle's own values; the environment now wins.
 
 ### Security
 

@@ -42,8 +42,10 @@ The environment variables below override `needle`'s built-in defaults.
   - [`GOLOG_FILE`](#golog_file)
   - [`GOLOG_TRACING_FILE`](#golog_tracing_file)
 - [Tracing](#tracing)
-  - [`NEEDLE_TRACING_AUTH`](#needle_tracing_auth)
   - [`NEEDLE_SAMPLING_FRACTION`](#needle_sampling_fraction)
+  - [`NEEDLE_TRACING_TRUST_TRACEPARENT`](#needle_tracing_trust_traceparent)
+  - [`NEEDLE_TRACING_AUTH`](#needle_tracing_auth)
+  - [`OTEL_*`](#otel_)
 - [Profiling](#profiling)
   - [`NEEDLE_PPROF`](#needle_pprof)
   - [`NEEDLE_ROUTER_TRACE`](#needle_router_trace)
@@ -372,19 +374,38 @@ Warning: tracing affects performance.
 
 ## Tracing
 
-See [tracing.md](tracing.md).
-
-### `NEEDLE_TRACING_AUTH`
-
-Setting a non-empty value enables on-demand per-request tracing.
-
-To honor a `Traceparent` or `Tracestate` header, Needle requires the request to carry an `Authorization` header whose value matches `NEEDLE_TRACING_AUTH`.
+See [tracing.md](tracing.md). Nothing is exported, and nothing is sampled, until an exporter is configured through the `OTEL_*` variables below.
 
 ### `NEEDLE_SAMPLING_FRACTION`
 
-Fraction of routing requests to sample (0 to 1). Applied independently of `Traceparent`-based sampling.
+Fraction (0 to 1) of routing requests to sample when the request does not continue a trusted trace. A request that does continue one (see the next two variables) follows the sampled flag in its `Traceparent` instead, so a proxy in front of needle that makes the sampling decision is obeyed whatever this is set to.
 
 Default: `0`
+
+### `NEEDLE_TRACING_TRUST_TRACEPARENT`
+
+Continue the trace in every request's `Traceparent` header, and follow its sampled flag. Set this only when needle is reachable solely through a proxy that removes the client's `Traceparent` and `Tracestate` and sends its own; otherwise any client could choose which of its requests needle samples, and so how much it exports.
+
+Without it, a request's `Traceparent` is honoured only with [`NEEDLE_TRACING_AUTH`](#needle_tracing_auth). Any other request starts a new trace, sampled at `NEEDLE_SAMPLING_FRACTION`, and keeps the trace it named only as a span link.
+
+Default: `false`
+
+### `NEEDLE_TRACING_AUTH`
+
+Setting a non-empty value enables on-demand per-request tracing: a request whose `Authorization` header equals this value continues the trace in its `Traceparent` header, and is sampled when that header's sampled flag is set. It is for tracing one request by hand, by a caller that can reach needle without going through a proxy that replaces `Traceparent`.
+
+Default: unset
+
+### `OTEL_*`
+
+needle reads the standard [OpenTelemetry SDK environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/). The ones that matter most:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`): where to send spans, for example `http://127.0.0.1:4318`. Setting it alone is enough to export over OTLP; `OTEL_TRACES_EXPORTER` defaults to `otlp` when an endpoint is set.
+- `OTEL_EXPORTER_OTLP_PROTOCOL`: `http/protobuf` (the default) or `grpc` (with an endpoint such as `http://127.0.0.1:4317`).
+- `OTEL_TRACES_EXPORTER`: `otlp`, `stdout`, `file` (written to `OTEL_EXPORTER_FILE_PATH`) or `none`. See [Boxo Tracing](https://github.com/ipfs/boxo/blob/main/docs/tracing.md).
+- `OTEL_SERVICE_NAME`: overrides `service.name`, which defaults to `needle`.
+- `OTEL_RESOURCE_ATTRIBUTES`: extra resource attributes, and overrides for needle's own. needle sets `service.instance.id` to `<hostname>:<API port>`, which tells apart instances that share a host; set it here to name an instance differently.
+- `OTEL_PROPAGATORS`: the header formats read and written, by default W3C Trace Context and Baggage.
 
 ## Profiling
 

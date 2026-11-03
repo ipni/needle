@@ -104,9 +104,12 @@ func TestCombineRouters(t *testing.T) {
 	// Mock router for testing
 	mockRouter := composableRouter{}
 
-	// Check that combineRouters with DHT only returns sanitizeRouter
+	// Check that combineRouters with DHT only returns sanitizeRouter, wrapped
+	// so it still gets a router span
 	v := combineRouters(nil, &bundledDHT{}, nil, nil, nil, nil, DNSAddrResolutionNever, false, 0, 0, 0)
-	require.IsType(t, sanitizeRouter{}, v)
+	require.IsType(t, tracedRouter{}, v)
+	require.IsType(t, sanitizeRouter{}, v.(tracedRouter).router)
+	require.Equal(t, "dht", v.(tracedRouter).name)
 
 	// Check that combineRouters with delegated routers only returns parallelRouter
 	v = combineRouters(nil, nil, nil, []router{mockRouter}, nil, nil, DNSAddrResolutionNever, false, 0, 0, 0)
