@@ -23,6 +23,9 @@ The following emojis are used to highlight certain changes:
 
 ### Security
 
+- Upgraded `go.opentelemetry.io/otel/exporters/otlp/otlptrace`, `otlptracegrpc` and `otlptracehttp` to v1.45.0 for [GHSA-8wmf-6v46-5gfg](https://github.com/advisories/GHSA-8wmf-6v46-5gfg) (exporter config logging may leak endpoint URLs in info logs).
+- Upgraded `google.golang.org/grpc` to v1.83.2 for [GHSA-2v4p-qf9q-27wj](https://github.com/advisories/GHSA-2v4p-qf9q-27wj), [GHSA-qc2q-p7wx-3px3](https://github.com/advisories/GHSA-qc2q-p7wx-3px3), [GHSA-vp52-pcj8-j9qc](https://github.com/advisories/GHSA-vp52-pcj8-j9qc) and [GHSA-hrxh-6v49-42gf](https://github.com/advisories/GHSA-hrxh-6v49-42gf).
+
 ## [v1.0.0] - 2026-09-18
 
 ### Changed
