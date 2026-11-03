@@ -100,7 +100,7 @@ For self-hosting, run the [prebuilt Docker image](#docker).
    1. Updates [`CHANGELOG.md`](CHANGELOG.md) with entries for the current release
    2. Updates the [`version.json`](./version.json) file
 2. Once the release checker creates a draft release, copy-paste the changelog into the draft
-3. Merge the PR; the release workflow tags and publishes automatically
+3. Merge the PR; the release workflow tags, publishes the GitHub release, and starts the [`docker.yml`](.github/workflows/docker.yml) build that pushes `ghcr.io/ipni/needle:vX.Y.Z`
 
 ## License
 

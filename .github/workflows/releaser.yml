@@ -17,3 +17,18 @@ jobs:
     uses: ipdxco/unified-github-workflows/.github/workflows/releaser.yml@v1.0
     secrets:
       UCI_GITHUB_TOKEN: ${{ secrets.UCI_GITHUB_TOKEN }}
+  # The release above tags with GITHUB_TOKEN unless UCI_GITHUB_TOKEN is set, and
+  # a tag pushed with GITHUB_TOKEN starts no on.push workflows, so docker.yml's
+  # tag trigger never fires. workflow_dispatch is the documented exception.
+  publish-image:
+    needs: [releaser]
+    if: fromJSON(needs.releaser.outputs.json)['version.json']
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Start the image build for the new tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ fromJSON(needs.releaser.outputs.json)['version.json'].version }}
+        run: gh workflow run docker.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
